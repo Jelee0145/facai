@@ -1,0 +1,40 @@
+import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export function middleware(request: NextRequest) {
+  const response = NextResponse.next();
+  const isDev = process.env.NODE_ENV === "development";
+
+  const backendUrl = process.env.BACKEND_URL || "http://localhost:8001";
+  const connectSrc = isDev ? `'self' ${backendUrl}` : "'self'";
+
+  const csp = [
+    "default-src 'self'",
+    `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self'",
+    `connect-src ${connectSrc}`,
+    "frame-src 'none'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+  ].join("; ");
+
+  const headers = response.headers;
+  headers.set("Content-Security-Policy", csp);
+  headers.set("X-Frame-Options", "DENY");
+  headers.set("X-Content-Type-Options", "nosniff");
+  headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
+  headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  if (!isDev) {
+    headers.set("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload");
+  }
+
+  return response;
+}
+
+export const config = {
+  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+};
