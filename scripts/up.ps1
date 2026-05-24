@@ -10,19 +10,21 @@ function Stop-ProcessOnPort($port) {
         Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 1
     }
-    Write-Host "Port $port is free." -ForegroundColor Green
+    Write-Host "  Port $port is free. ✓" -ForegroundColor Green
 }
 
-function Check-NodeVersion {
+function Ensure-Node {
     $v = (node -v 2>$null)
-    if (-not $v) {
-        Write-Host "Node.js 未安装！请从 https://nodejs.org 下载 >=20.9" -ForegroundColor Red
-        exit 1
-    }
-    $ver = $v.TrimStart("v")
-    if ([Version]$ver -lt [Version]"20.9") {
-        Write-Host "Node.js $v 版本过低，需要 >=20.9。请从 https://nodejs.org 升级" -ForegroundColor Red
-        exit 1
+    if (-not $v -or ([Version]($v.TrimStart("v")) -lt [Version]"20.9")) {
+        Write-Host "  Node.js 未安装或版本低于 20.9，正在通过 winget 安装..." -ForegroundColor Yellow
+        winget install -e --id OpenJS.NodeJS --silent --accept-package-agreements 2>&1 | Out-Null
+        # 刷新 PATH 让新安装的 node 生效
+        $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+        $v = (node -v 2>$null)
+        if (-not $v) {
+            Write-Host "  Node.js 安装失败，请从 https://nodejs.org 手动下载 >=20.9" -ForegroundColor Red
+            exit 1
+        }
     }
     Write-Host "  Node.js $v  ✓" -ForegroundColor Green
 }
@@ -40,24 +42,25 @@ function Ensure-Pnpm {
             $pnpmVer = (pnpm -v 2>$null)
         }
         if (-not $pnpmVer) {
-            Write-Host "  pnpm 安装失败，请手动安装: npm install -g pnpm" -ForegroundColor Red
+            Write-Host "  pnpm 安装失败，请手动执行: npm install -g pnpm" -ForegroundColor Red
             exit 1
         }
     }
     Write-Host "  pnpm $pnpmVer  ✓" -ForegroundColor Green
 }
 
-function Check-Python {
+function Ensure-Python {
     $v = (python --version 2>$null)
     if (-not $v) { $v = (python3 --version 2>$null) }
-    if (-not $v) {
-        Write-Host "Python 未安装！请从 https://www.python.org/downloads/ 下载 >=3.11" -ForegroundColor Red
-        exit 1
-    }
-    $ver = ($v -replace ".*\s", "")
-    if ([Version]$ver -lt [Version]"3.11") {
-        Write-Host "$v 版本过低，需要 >=3.11" -ForegroundColor Red
-        exit 1
+    if (-not $v -or ([Version]($v -replace ".*\s", "") -lt [Version]"3.11")) {
+        Write-Host "  Python 未安装或版本低于 3.11，正在通过 winget 安装..." -ForegroundColor Yellow
+        winget install -e --id Python.Python.3.11 --silent --accept-package-agreements 2>&1 | Out-Null
+        $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+        $v = (python --version 2>$null)
+        if (-not $v) {
+            Write-Host "  Python 安装失败，请从 https://www.python.org/downloads/ 手动下载 >=3.11" -ForegroundColor Red
+            exit 1
+        }
     }
     Write-Host "  $v  ✓" -ForegroundColor Green
 }
@@ -74,19 +77,34 @@ function Install-PythonDeps {
     }
 }
 
-function Check-EnvFiles {
+function Ensure-EnvFiles {
     $rootEnv = Join-Path $ProjectRoot ".env"
+    $rootExample = Join-Path $ProjectRoot ".env.example"
     $backEnv = Join-Path $ProjectRoot "backend\.env"
+    $backExample = Join-Path $ProjectRoot "backend\.env.example"
+
     if (-not (Test-Path $rootEnv)) {
-        Write-Host "  .env 不存在！请创建并填入 APIMART_API_KEY" -ForegroundColor Yellow
-        Write-Host "    参考 .env.example 模板" -ForegroundColor Gray
+        if (Test-Path $rootExample) {
+            Copy-Item $rootExample $rootEnv
+            Write-Host "  .env 已从 .env.example 创建，请填入你的 APIMART_API_KEY" -ForegroundColor Yellow
+        } else {
+            Write-Host "  .env 和 .env.example 都不存在，请手动创建 .env" -ForegroundColor Red
+        }
     } else {
         Write-Host "  .env  ✓" -ForegroundColor Green
     }
+
     if (-not (Test-Path $backEnv)) {
-        Write-Host "  backend\.env 不存在！请创建并填入 APIMART_API_KEY 和 JWT_SECRET" -ForegroundColor Yellow
-        Write-Host "    参考 backend\.env.example 模板" -ForegroundColor Gray
-        Write-Host "    JWT_SECRET 生成: python -c ""import secrets; print(secrets.token_hex(32))""" -ForegroundColor Gray
+        if (Test-Path $backExample) {
+            Copy-Item $backExample $backEnv
+            # 自动生成随机 JWT_SECRET
+            $jwtSecret = -join ((48..57) + (97..102) | Get-Random -Count 64 | ForEach-Object { [char]$_ })
+            (Get-Content $backEnv) -replace "JWT_SECRET=.*", "JWT_SECRET=$jwtSecret" | Set-Content $backEnv
+            Write-Host "  backend\.env 已从 .env.example 创建，JWT_SECRET 已自动生成" -ForegroundColor Yellow
+            Write-Host "  请填入 APIMART_API_KEY（当前为占位符）" -ForegroundColor Yellow
+        } else {
+            Write-Host "  backend\.env 和 .env.example 都不存在，请手动创建" -ForegroundColor Red
+        }
     } else {
         Write-Host "  backend\.env  ✓" -ForegroundColor Green
     }
@@ -99,10 +117,10 @@ Write-Host ""
 
 Set-Location $ProjectRoot
 
-Write-Host "[1/8] Checking environment..." -ForegroundColor Cyan
-Check-NodeVersion
+Write-Host "[1/8] Checking & installing runtime..." -ForegroundColor Cyan
+Ensure-Node
 Ensure-Pnpm
-Check-Python
+Ensure-Python
 
 Write-Host "[2/8] Installing frontend dependencies..." -ForegroundColor Cyan
 pnpm install --loglevel warn
@@ -110,8 +128,8 @@ pnpm install --loglevel warn
 Write-Host "[3/8] Installing backend dependencies..." -ForegroundColor Cyan
 Install-PythonDeps
 
-Write-Host "[4/8] Checking .env configuration..." -ForegroundColor Cyan
-Check-EnvFiles
+Write-Host "[4/8] Ensuring .env files..." -ForegroundColor Cyan
+Ensure-EnvFiles
 
 Write-Host "[5/8] Cleaning ports..." -ForegroundColor Cyan
 Stop-ProcessOnPort $BackendPort
