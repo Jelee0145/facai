@@ -1,20 +1,28 @@
-# 使用前需先创建 ./backend/Dockerfile 和 ./Dockerfile（项目根目录）
 services:
   backend:
     build:
       context: ./backend
-      dockerfile: Dockerfile
-    ports:
-      - "8001:8001"
+      dockerfile: ../Dockerfile.backend
     env_file: ./backend/.env
+    environment:
+      - NODE_ENV=production
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:5000}
+      - COOKIE_SECURE=${COOKIE_SECURE:-false}
+    volumes:
+      - ./backend/data.db:/app/data.db
     restart: unless-stopped
 
   frontend:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
     ports:
       - "5000:5000"
     environment:
-      BACKEND_URL: http://backend:8001
+      - NODE_ENV=production
+      - BACKEND_URL=http://backend:8001
+      - HOSTNAME=0.0.0.0
+      - PORT=5000
     depends_on:
       - backend
     restart: unless-stopped
