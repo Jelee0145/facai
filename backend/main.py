@@ -114,6 +114,27 @@ async def global_exception_handler(request: Request, exc: Exception):
 async def startup():
     """启动时恢复未完成任务，清理过期数据"""
     init_db()
+    # 自动 seed 管理员
+    try:
+        from database import get_user, create_user
+        from security import hash_password
+        admin_pw = os.getenv("ADMIN_PASSWORD", "admin123")
+        if not get_user("admin"):
+            create_user("admin", hash_password(admin_pw))
+            print(f"[INIT] 管理员已创建 (密码: {admin_pw})")
+        else:
+            print("[INIT] 管理员已存在")
+    except Exception as e:
+        print(f"[INIT] 管理员创建失败: {e}")
+    # 自动导入 API Key
+    try:
+        from database import get_key_by_value, add_key
+        api_key = os.getenv("APIMART_API_KEY", "")
+        if api_key and not get_key_by_value(api_key):
+            add_key(api_key, name="默认 Key", daily_limit=200)
+            print(f"[INIT] API Key 已导入")
+    except Exception as e:
+        print(f"[INIT] API Key 导入失败: {e}")
     delete_old_tasks(hours=24)
     pending = load_pending_tasks()
     if pending:

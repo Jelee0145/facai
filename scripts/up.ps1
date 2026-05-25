@@ -1,6 +1,15 @@
 $FrontendPort = 5000
 $BackendPort = 8001
-$ProjectRoot = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+
+# 脚本始终从项目根目录执行
+$ProjectRoot = (Get-Location).Path
+
+# 安全校验
+if (-not (Test-Path (Join-Path $ProjectRoot "package.json"))) {
+    Write-Host "ERROR: Run this script from the project root (where package.json is)." -ForegroundColor Red
+    Write-Host "  cd D:\project\projects" -ForegroundColor Yellow
+    exit 1
+}
 
 function Stop-ProcessOnPort($port) {
     $conn = netstat -ano | Select-String "LISTENING" | Select-String ":$port "
@@ -10,59 +19,58 @@ function Stop-ProcessOnPort($port) {
         Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 1
     }
-    Write-Host "  Port $port is free. ✓" -ForegroundColor Green
+    Write-Host "  Port $port is free." -ForegroundColor Green
 }
 
 function Ensure-Node {
     $v = (node -v 2>$null)
     if (-not $v -or ([Version]($v.TrimStart("v")) -lt [Version]"20.9")) {
-        Write-Host "  Node.js 未安装或版本低于 20.9，正在通过 winget 安装..." -ForegroundColor Yellow
+        Write-Host "  Node.js not found or below 20.9, installing via winget..." -ForegroundColor Yellow
         winget install -e --id OpenJS.NodeJS --silent --accept-package-agreements 2>&1 | Out-Null
-        # 刷新 PATH 让新安装的 node 生效
         $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
         $v = (node -v 2>$null)
         if (-not $v) {
-            Write-Host "  Node.js 安装失败，请从 https://nodejs.org 手动下载 >=20.9" -ForegroundColor Red
+            Write-Host "  Node.js install failed. Download from https://nodejs.org (>=20.9)" -ForegroundColor Red
             exit 1
         }
     }
-    Write-Host "  Node.js $v  ✓" -ForegroundColor Green
+    Write-Host "  Node.js $v" -ForegroundColor Green
 }
 
 function Ensure-Pnpm {
     $pnpmVer = (pnpm -v 2>$null)
     if (-not $pnpmVer) {
-        Write-Host "  pnpm 未安装，正在通过 corepack 安装..." -ForegroundColor Yellow
+        Write-Host "  pnpm not found, installing via corepack..." -ForegroundColor Yellow
         corepack enable 2>$null
         corepack prepare pnpm@latest --activate 2>$null
         $pnpmVer = (pnpm -v 2>$null)
         if (-not $pnpmVer) {
-            Write-Host "  corepack 不可用，尝试 npm install -g pnpm ..." -ForegroundColor Yellow
+            Write-Host "  corepack unavailable, trying npm install -g pnpm..." -ForegroundColor Yellow
             npm install -g pnpm 2>$null
             $pnpmVer = (pnpm -v 2>$null)
         }
         if (-not $pnpmVer) {
-            Write-Host "  pnpm 安装失败，请手动执行: npm install -g pnpm" -ForegroundColor Red
+            Write-Host "  pnpm install failed. Run: npm install -g pnpm" -ForegroundColor Red
             exit 1
         }
     }
-    Write-Host "  pnpm $pnpmVer  ✓" -ForegroundColor Green
+    Write-Host "  pnpm $pnpmVer" -ForegroundColor Green
 }
 
 function Ensure-Python {
     $v = (python --version 2>$null)
     if (-not $v) { $v = (python3 --version 2>$null) }
     if (-not $v -or ([Version]($v -replace ".*\s", "") -lt [Version]"3.11")) {
-        Write-Host "  Python 未安装或版本低于 3.11，正在通过 winget 安装..." -ForegroundColor Yellow
+        Write-Host "  Python not found or below 3.11, installing via winget..." -ForegroundColor Yellow
         winget install -e --id Python.Python.3.11 --silent --accept-package-agreements 2>&1 | Out-Null
         $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
         $v = (python --version 2>$null)
         if (-not $v) {
-            Write-Host "  Python 安装失败，请从 https://www.python.org/downloads/ 手动下载 >=3.11" -ForegroundColor Red
+            Write-Host "  Python install failed. Download from https://www.python.org/downloads/ (>=3.11)" -ForegroundColor Red
             exit 1
         }
     }
-    Write-Host "  $v  ✓" -ForegroundColor Green
+    Write-Host "  $v" -ForegroundColor Green
 }
 
 function Install-PythonDeps {
@@ -71,7 +79,7 @@ function Install-PythonDeps {
         Write-Host "  Installing Python dependencies..." -ForegroundColor Cyan
         pip install -r $req -q
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "  pip install failed, trying with --break-system-packages..." -ForegroundColor Yellow
+            Write-Host "  pip failed, trying --break-system-packages..." -ForegroundColor Yellow
             pip install -r $req -q --break-system-packages
         }
     }
@@ -86,38 +94,36 @@ function Ensure-EnvFiles {
     if (-not (Test-Path $rootEnv)) {
         if (Test-Path $rootExample) {
             Copy-Item $rootExample $rootEnv
-            Write-Host "  .env 已从 .env.example 创建，请填入你的 APIMART_API_KEY" -ForegroundColor Yellow
+            Write-Host "  .env created from .env.example. Fill in APIMART_API_KEY." -ForegroundColor Yellow
         } else {
-            Write-Host "  .env 和 .env.example 都不存在，请手动创建 .env" -ForegroundColor Red
+            Write-Host "  .env and .env.example not found. Create .env manually." -ForegroundColor Red
         }
     } else {
-        Write-Host "  .env  ✓" -ForegroundColor Green
+        Write-Host "  .env" -ForegroundColor Green
     }
 
     if (-not (Test-Path $backEnv)) {
         if (Test-Path $backExample) {
             Copy-Item $backExample $backEnv
-            # 自动生成随机 JWT_SECRET
             $jwtSecret = -join ((48..57) + (97..102) | Get-Random -Count 64 | ForEach-Object { [char]$_ })
             (Get-Content $backEnv) -replace "JWT_SECRET=.*", "JWT_SECRET=$jwtSecret" | Set-Content $backEnv
-            Write-Host "  backend\.env 已从 .env.example 创建，JWT_SECRET 已自动生成" -ForegroundColor Yellow
-            Write-Host "  请填入 APIMART_API_KEY（当前为占位符）" -ForegroundColor Yellow
+            Write-Host "  backend\.env created from .env.example with random JWT_SECRET." -ForegroundColor Yellow
+            Write-Host "  Fill in APIMART_API_KEY (currently placeholder)." -ForegroundColor Yellow
         } else {
-            Write-Host "  backend\.env 和 .env.example 都不存在，请手动创建" -ForegroundColor Red
+            Write-Host "  backend\.env and .env.example not found. Create manually." -ForegroundColor Red
         }
     } else {
-        Write-Host "  backend\.env  ✓" -ForegroundColor Green
+        Write-Host "  backend\.env" -ForegroundColor Green
     }
 }
 
 Write-Host "=========================================" -ForegroundColor Cyan
-Write-Host "  One-click start: F&A Generation Tool" -ForegroundColor Cyan
+Write-Host "  One-click start: F+A Generation Tool" -ForegroundColor Cyan
 Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host ""
+Write-Host "Project root: $ProjectRoot" -ForegroundColor Gray
 
-Set-Location $ProjectRoot
-
-Write-Host "[1/8] Checking & installing runtime..." -ForegroundColor Cyan
+Write-Host "[1/8] Checking and installing runtime..." -ForegroundColor Cyan
 Ensure-Node
 Ensure-Pnpm
 Ensure-Python
@@ -157,7 +163,7 @@ try {
     pnpm tsx watch src/server.ts
 }
 finally {
-    Write-Host "`nStopping backend..." -ForegroundColor Yellow
+    Write-Host "Stopping backend..." -ForegroundColor Yellow
     Stop-Job -Job $backendJob -ErrorAction SilentlyContinue
     Remove-Job -Job $backendJob -ErrorAction SilentlyContinue
     Write-Host "All services stopped." -ForegroundColor Green

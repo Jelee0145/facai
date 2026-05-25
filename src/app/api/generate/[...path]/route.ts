@@ -3,7 +3,7 @@
  */
 import { NextRequest, NextResponse } from "next/server";
 
-const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8001";
+const BACKEND_URL = (process.env.BACKEND_URL || "http://localhost:8001").trim();
 const API_AUTH_TOKEN = process.env.API_AUTH_TOKEN || "";
 const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10MB
 
@@ -34,7 +34,7 @@ async function proxyToBackend(
     const headers: Record<string, string> = {};
     request.headers.forEach((value, key) => {
       const k = key.toLowerCase();
-      if (k !== "host" && k !== "content-length" && k !== "transfer-encoding") {
+      if (k !== "host" && k !== "content-length" && k !== "transfer-encoding" && k !== "expect") {
         headers[key] = value;
       }
     });
