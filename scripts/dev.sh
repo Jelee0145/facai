@@ -2,8 +2,8 @@
 set -Eeuo pipefail
 
 
-PORT=5000
-DEPLOY_RUN_PORT=5000
+PORT=4524
+DEPLOY_RUN_PORT=4524
 
 kill_port_if_listening() {
     local pids

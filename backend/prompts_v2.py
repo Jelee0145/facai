@@ -489,8 +489,19 @@ CATEGORY_MODEL_MAP = {
 }
 
 
+FRONTEND_MODEL_MAP = {
+    "portrait": "flux",
+    "fashion": "flux",
+    "product": "dalle",
+    "artistic": "midjourney",
+    "viral": "flux",
+}
+
 def select_model(user_model: str, category: dict) -> str:
-    """智能模型选择"""
+    """智能模型选择 — 支持前端模型码，映射到对应 AI 模型"""
+    if user_model in FRONTEND_MODEL_MAP:
+        return FRONTEND_MODEL_MAP[user_model]
+
     if user_model and user_model in AI_MODEL_PROFILES and user_model != "general":
         return user_model
 
@@ -505,6 +516,12 @@ def get_model_profile(model_code: str) -> dict:
 # ============================================================
 # 三、国家市场本地化配置
 # ============================================================
+
+MODEL_STYLE_NAMES = [
+    "时尚街拍风", "都市休闲风", "杂志大片风", "生活方式风",
+    "自信站姿风", "活力户外风", "职业商务风", "海滩度假风",
+    "艺术优雅风", "运动活力风", "奢华时尚风",
+]
 
 COUNTRY_CONFIG = {
     "japan": {
@@ -570,6 +587,22 @@ COUNTRY_CONFIG = {
         "style_preference": "东南亚穆斯林时尚，注重端庄和现代结合，偏好舒适面料",
         "shopping_behavior": "社交电商大国，关注价格和促销，受本地KOL影响",
         "hashtags": ["#TikTokShopID", "#fashion", "#ootdindonesia", "#hits", "#murah", "#berkualitas", "#diskongede", "#gratisongkir", "#viral", "#rekomendasi"],
+    },
+    "malaysia": {
+        "name": "马来西亚", "flag": "🇲🇾", "language": "马来语",
+        "platform": "TikTok Shop Malaysia",
+        "model_desc": "Malaysian woman, 20-30 years old, warm golden-brown skin, Southeast Asian beauty with diverse ethnic features (Malay, Chinese, Indian), modern modest fashion with vibrant colors, friendly warm smile",
+        "style_preference": "多元文化融合风，马来传统与现代结合，偏好舒适透气的棉麻面料和鲜艳色彩",
+        "shopping_behavior": "年轻消费者活跃，受社交媒体和直播影响大，关注性价比和促销活动",
+        "hashtags": ["#TikTokShopMY", "#fesyen", "#ootdmalaysia", "#cantik", "#murah", "#viral", "#trending", "#fashion", "#style", "#rekomendasi"],
+    },
+    "philippines": {
+        "name": "菲律宾", "flag": "🇵🇭", "language": "他加禄语/英语",
+        "platform": "TikTok Shop Philippines",
+        "model_desc": "Filipina woman, 20-30 years old, warm tan skin, Southeast Asian features with Spanish influence, long dark hair, bright cheerful smile, slim to medium build, trendy confident style",
+        "style_preference": "东南亚甜美时髦风，受韩流和美国潮流双重影响，偏好修身剪裁和清新色彩",
+        "shopping_behavior": "社交媒体高度活跃，TikTok趋势驱动消费，注重性价比和快速配送",
+        "hashtags": ["#TikTokShopPH", "#OOTD", "#fashion", "#style", "#trending", "#mura", "#ganda", "#viral", "#budol", "#rekomendado"],
     },
     "saudi": {
         "name": "沙特阿拉伯", "flag": "🇸🇦", "language": "阿拉伯语",

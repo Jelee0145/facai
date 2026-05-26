@@ -1,6 +1,7 @@
 "use client";
 
-import { createContext, useContext, useState, useEffect, ReactNode } from "react";
+import { createContext, useContext, useState, useEffect, useRef, ReactNode } from "react";
+import { toast } from "@/components/ui/toast";
 
 interface AuthContextType {
   user: Record<string, unknown> | null;
@@ -21,6 +22,7 @@ const AuthContext = createContext<AuthContextType>({
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<Record<string, unknown> | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const csrfTokenRef = useRef("");
 
   // 初始化时通过 /api/admin/me 检测会话状态
   useEffect(() => {
@@ -29,7 +31,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (r.ok) return r.json();
         throw new Error("not authenticated");
       })
-      .then((data) => setUser(data))
+      .then((data) => {
+        if (data.csrf_token) csrfTokenRef.current = data.csrf_token;
+        setUser(data);
+      })
       .catch(() => setUser(null))
       .finally(() => setIsLoading(false));
   }, []);
@@ -42,16 +47,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         body: JSON.stringify({ username, password }),
       });
       if (!resp.ok) {
-        const err = await resp.json().catch(() => ({}));
-        alert(err.detail || "登录失败");
+        const err = await resp.json().catch(() => ({})) as Record<string, unknown>;
+        toast.error(String(err.detail || "登录失败"));
         return false;
       }
       const data = await resp.json();
+      if (data.csrf_token) csrfTokenRef.current = data.csrf_token;
       const userObj = data.user || { username: data.username, role: data.role };
       setUser(userObj);
       return true;
     } catch {
-      alert("网络错误，请检查后端服务是否运行");
+      toast.error("网络错误，请检查后端服务是否运行");
       return false;
     }
   };
@@ -71,6 +77,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
     if (options.body && !headers["Content-Type"]) {
       headers["Content-Type"] = "application/json";
+    }
+    // inject CSRF token for state-changing requests
+    const method = (options.method || "GET").toUpperCase();
+    if (["POST", "PUT", "DELETE"].includes(method) && csrfTokenRef.current) {
+      headers["X-CSRF-Token"] = csrfTokenRef.current;
     }
     const resp = await fetch(url, { ...options, headers });
     if (resp.status === 401) {

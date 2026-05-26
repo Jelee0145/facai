@@ -5,7 +5,7 @@ COPY package.json pnpm-lock.yaml .npmrc ./
 RUN pnpm install --frozen-lockfile
 COPY . .
 RUN pnpm next build
-RUN pnpm tsup src/server.ts --format cjs --platform node --target node20 --outDir dist --no-splitting --no-minify
+RUN pnpm tsup src/server.ts --format cjs --platform node --target node20 --outDir dist --no-splitting --minify
 
 FROM node:22-alpine AS runner
 WORKDIR /app

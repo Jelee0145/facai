@@ -1,10 +1,10 @@
 $FrontendPort = 5000
 $BackendPort = 8001
 
-# 脚本始终从项目根目录执行
+# Script always runs from project root
 $ProjectRoot = (Get-Location).Path
 
-# 安全校验
+# Safety check
 if (-not (Test-Path (Join-Path $ProjectRoot "package.json"))) {
     Write-Host "ERROR: Run this script from the project root (where package.json is)." -ForegroundColor Red
     Write-Host "  cd D:\project\projects" -ForegroundColor Yellow
@@ -107,7 +107,9 @@ function Ensure-EnvFiles {
             Copy-Item $backExample $backEnv
             $jwtSecret = -join ((48..57) + (97..102) | Get-Random -Count 64 | ForEach-Object { [char]$_ })
             (Get-Content $backEnv) -replace "JWT_SECRET=.*", "JWT_SECRET=$jwtSecret" | Set-Content $backEnv
-            Write-Host "  backend\.env created from .env.example with random JWT_SECRET." -ForegroundColor Yellow
+            $adminPw = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 12 | ForEach-Object { [char]$_ })
+            Add-Content -Path $backEnv -Value "`nADMIN_PASSWORD=$adminPw"
+            Write-Host "  backend\.env created with random JWT_SECRET and ADMIN_PASSWORD." -ForegroundColor Yellow
             Write-Host "  Fill in APIMART_API_KEY (currently placeholder)." -ForegroundColor Yellow
         } else {
             Write-Host "  backend\.env and .env.example not found. Create manually." -ForegroundColor Red

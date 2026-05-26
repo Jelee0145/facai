@@ -8,11 +8,13 @@ export function middleware(request: NextRequest) {
 
   const backendUrl = process.env.BACKEND_URL || "http://localhost:8001";
   const connectSrc = isDev ? `'self' ${backendUrl}` : "'self'";
+  const scriptSrc = isDev ? "'self' 'unsafe-inline' 'unsafe-eval'" : "'self'";
+  const styleSrc = isDev ? "'self' 'unsafe-inline'" : "'self'";
 
   const csp = [
     "default-src 'self'",
-    `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
-    "style-src 'self' 'unsafe-inline'",
+    `script-src ${scriptSrc}`,
+    `style-src ${styleSrc}`,
     "img-src 'self' data: blob:",
     "font-src 'self'",
     `connect-src ${connectSrc}`,

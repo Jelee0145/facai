@@ -15,12 +15,18 @@ init_db()
 if not get_user("admin"):
     seed_password = os.getenv("ADMIN_PASSWORD", "") or secrets.token_urlsafe(12)
     create_user("admin", hash_password(seed_password))
-    print("[SEED] 管理员账号已创建")
-    print(f"[SEED] 用户名: admin")
-    print(f"[SEED] 密  码: {seed_password if os.getenv('ADMIN_PASSWORD') else '<随机生成> 首次登录请立即修改密码'}")
+    print("[SEED] Admin account created")
+    print("[SEED] Username: admin")
     if not os.getenv("ADMIN_PASSWORD"):
-        print(f"[SEED] 密码: {seed_password}")
-        print(f"[SEED] ⚠️ 请立即登录并修改密码！也可通过 ADMIN_PASSWORD 环境变量预设密码")
+        env_path = os.path.join(os.path.dirname(__file__) or ".", ".env")
+        try:
+            with open(env_path, "a" if os.path.exists(env_path) else "w", encoding="utf-8") as f:
+                f.write(f"\nADMIN_PASSWORD={seed_password}\n")
+            print("[SEED] Password saved to backend/.env (ADMIN_PASSWORD)")
+        except Exception:
+            print("[SEED] WARNING: Could not save password to .env")
+    else:
+        print("[SEED] Password set from ADMIN_PASSWORD environment variable")
 else:
     print("[SEED] 管理员账号已存在")
 

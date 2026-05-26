@@ -25,7 +25,7 @@ docker compose up --build -d
 Write-Host "[3/3] Checking status..." -ForegroundColor Cyan
 docker compose ps
 Write-Host ""
-Write-Host "Frontend: http://localhost:5000" -ForegroundColor Green
+Write-Host "Frontend: http://localhost:4524" -ForegroundColor Green
 Write-Host ""
 Write-Host "Use 'docker compose logs -f' to follow logs." -ForegroundColor Yellow
 Write-Host "Use 'docker compose down' to stop." -ForegroundColor Yellow

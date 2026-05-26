@@ -1,6 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { promises as dns } from "dns";
 
+const BACKEND_URL = (process.env.BACKEND_URL || "http://localhost:8001").trim();
+const ALLOWED_ORIGINS = new Set([
+  "http://localhost:4524",
+  BACKEND_URL.endsWith("/") ? BACKEND_URL.slice(0, -1) : BACKEND_URL,
+]);
+
+function getAllowedOrigin(request: NextRequest): string | null {
+  const origin = request.headers.get("origin");
+  if (!origin) return null;
+  if (ALLOWED_ORIGINS.has(origin)) return origin;
+  return null;
+}
+
 const MAX_SIZE = 10 * 1024 * 1024;
 const FETCH_TIMEOUT = 30_000;
 
@@ -99,13 +112,16 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Image too large" }, { status: 413 });
     }
 
-    return new NextResponse(buffer, {
-      headers: {
-        "Content-Type": contentType,
-        "Cache-Control": "public, max-age=31536000",
-        "Access-Control-Allow-Origin": "*",
-      },
-    });
+    const corsOrigin = getAllowedOrigin(request);
+    const resHeaders: Record<string, string> = {
+      "Content-Type": contentType,
+      "Cache-Control": "public, max-age=31536000",
+    };
+    if (corsOrigin) {
+      resHeaders["Access-Control-Allow-Origin"] = corsOrigin;
+    }
+
+    return new NextResponse(buffer, { headers: resHeaders });
   } catch {
     return NextResponse.json({ error: "Failed to fetch image" }, { status: 502 });
   }

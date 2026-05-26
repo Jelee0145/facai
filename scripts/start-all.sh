@@ -1,7 +1,7 @@
 #!/bin/bash
 set -Eeuo pipefail
 
-FRONTEND_PORT=5000
+FRONTEND_PORT=4524
 BACKEND_PORT=8001
 
 

@@ -18,6 +18,11 @@
 - **管理后台**: `/admin` (登录、API Key 管理、生成历史、仪表盘)
 - **后端数据库**: SQLite (`backend/data.db`) 存储 API Keys 和生成历史
 - **多 Key 负载均衡**: `backend/key_manager.py` 轮询多个 API Key，自动故障转移
+- **SSE 实时状态**: Server-Sent Events 实现生成任务状态实时推送
+- **CSRF 保护**: CSRF 中间件防御跨站请求伪造
+- **Circuit Breaker + Retry**: 前端请求熔断器与自动重试
+- **Rate Limiting**: slowapi 实现后端 API 速率限制
+- **LLM Provider**: 可切换的 LLM 提供商接入层
 
 ## 关键命令
 
@@ -85,19 +90,56 @@ cd backend && python test_prompts.py
 │   ├── database.py         # SQLite CRUD
 │   ├── key_manager.py      # API Key 负载均衡
 │   ├── security.py         # JWT 认证
+│   ├── sse.py              # SSE 实时状态推送
+│   ├── csrf.py             # CSRF 保护中间件
+│   ├── middleware.py       # 中间件 (CORS, 限流, 请求日志)
+│   ├── llm_provider.py     # LLM 提供商抽象层
+│   ├── .env.example        # 环境变量示例
 │   └── data.db             # SQLite 数据库 (自动创建)
-├── scripts/                # 构建/启动脚本 (bash)
+├── scripts/                # 构建/启动脚本 (bash/PowerShell)
 │   ├── build.sh            # pnpm install → next build → tsup 打包 server
 │   ├── dev.sh              # 清端口 → tsx watch src/server.ts
 │   ├── start.sh            # node dist/server.js
-│   └── prepare.sh          # pnpm install
+│   ├── prepare.sh          # pnpm install
+│   ├── up.ps1              # Docker 一键启动 (PowerShell)
+│   └── start-all.sh        # 前后端同时启动脚本
 ├── src/
 │   ├── server.ts           # 自定义 Next.js HTTP server (entrypoint)
 │   ├── app/
 │   │   ├── page.tsx        # "发财计划" 主页面 (use client)
 │   │   ├── layout.tsx      # 根布局 (含 SEO metadata)
-│   │   ├── admin/          # 管理后台 (auth-context, history, keys)
+│   │   ├── error.tsx       # 全局错误边界
+│   │   ├── admin/
+│   │   │   ├── page.tsx    # 管理后台首页 (auth-context, history, keys)
+│   │   │   ├── error.tsx   # 管理后台错误边界
+│   │   │   └── login/
+│   │   │       └── page.tsx # 管理后台登录页
 │   │   └── api/generate/   # API 代理到 FastAPI 后端
-│   └── lib/apimart.ts      # apimart.ai API 客户端 (batchGenerateAndWait 等)
+│   ├── lib/
+│   │   ├── apimart.ts      # apimart.ai API 客户端 (batchGenerateAndWait 等)
+│   │   ├── fetch.ts        # 增强 fetch (超时/重试/CSRF)
+│   │   ├── circuit-breaker.ts # 请求熔断器
+│   │   ├── proxy.ts        # API 代理转发
+│   │   ├── logger.ts       # 前端日志工具
+│   │   └── use-sse.ts      # SSE 连接 hook
+│   └── components/
+│       ├── ui/
+│       │   ├── modal.tsx        # 通用模态框
+│       │   ├── error-boundary.tsx # 错误边界组件
+│       │   ├── toast.tsx        # Toast 提示
+│       │   ├── toaster.tsx      # Toast 容器
+│       │   └── toast-provider.tsx # Toast 上下文提供者
+│       ├── country-picker.tsx   # 国家选择器
+│       ├── model-picker.tsx     # 模型选择器
+│       └── image-gallery.tsx    # 图片画廊
+├── docker-compose.yml      # Docker Compose 编排
+├── Dockerfile.backend      # 后端 Dockerfile
+├── Dockerfile.frontend     # 前端 Dockerfile
+├── .dockerignore           # Docker 构建忽略规则
+├── docs/                   # 项目文档
+│   ├── REQUIREMENTS_v2.md  # v2 需求文档
+│   ├── TASKS_v2.md         # v2 任务拆分
+│   ├── SECURITY_UPGRADE.md # 安全升级指南
+│   └── DEPLOYMENT_CHECKLIST.md # 部署检查清单
 └── .env                    # APIMART_API_KEY (勿提交到公开仓库)
 ```

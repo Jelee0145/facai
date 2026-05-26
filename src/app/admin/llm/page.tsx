@@ -1,8 +1,8 @@
 "use client";
-/* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { useState, useEffect } from "react";
 import { useAuth } from "../auth-context";
+import { toast } from "@/components/ui/toast";
 
 export default function LlmConfigPage() {
   const { fetchWithAuth } = useAuth();
@@ -47,13 +47,13 @@ export default function LlmConfigPage() {
         body: JSON.stringify(body),
       });
       if (!r.ok) {
-        const err = await r.json().catch(() => ({}));
-        alert(err.detail || "保存失败");
+        const err = await r.json().catch(() => ({})) as Record<string, unknown>;
+        toast.error(String(err.detail || "保存失败"));
         return;
       }
       load();
     } catch {
-      alert("网络错误");
+      toast.error("网络错误");
     } finally {
       setSaving(false);
     }

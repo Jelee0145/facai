@@ -4,7 +4,7 @@ import next from 'next';
 
 const dev = process.env.NODE_ENV !== 'production';
 const hostname = process.env.HOSTNAME || 'localhost';
-const port = parseInt(process.env.PORT || '5000', 10);
+const port = parseInt(process.env.PORT || '4524', 10);
 
 // Create Next.js app
 const app = next({ dev, hostname, port });
@@ -31,5 +31,27 @@ app.prepare().then(() => {
         dev ? 'development' : 'production'
       }`,
     );
+  });
+
+  let shuttingDown = false;
+
+  function doShutdown(signal: string) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`\n[SHUTDOWN] Received ${signal}, shutting down...`);
+    server.close(() => {
+      console.log('[SHUTDOWN] Server closed gracefully');
+      process.exit(0);
+    });
+    setTimeout(() => {
+      console.log('[SHUTDOWN] Forcing exit after timeout');
+      process.exit(1);
+    }, 5000);
+  }
+
+  process.on('SIGTERM', () => doShutdown('SIGTERM'));
+  process.on('SIGINT', () => doShutdown('SIGINT'));
+  process.on('unhandledRejection', (reason) => {
+    console.error('[SHUTDOWN] Unhandled rejection:', reason);
   });
 });

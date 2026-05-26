@@ -172,3 +172,82 @@ python backend/test_security.py
 
 - `docs/DEPLOYMENT_CHECKLIST.md` — 部署安全基线检查清单
 - `backend/test_security.py` — 安全验收测试套件
+
+---
+
+## Round 2 — Reliability & Functional Protection
+
+### 目标
+
+提升系统在生产环境下的健壮性与功能安全，包括请求韧性、资源保护、组件性能与CSRF防御。
+
+### 改动清单
+
+| # | 文件 | 改动内容 | 状态 |
+|---|------|----------|------|
+| R2.1 | `src/lib/fetch.ts` | `fetchWithRetry`: 失败自动重试3次，指数退避(1s/2s/4s)，仅对5xx/网络错误重试 | -- |
+| R2.2 | `src/lib/circuit-breaker.ts` | **新建** — CircuitBreaker: 连续5失败 -> OPEN(30s) -> HALF_OPEN(允许1探测) -> CLOSED | -- |
+| R2.3 | `src/server.ts` | 优雅关闭: 监听 SIGTERM/SIGINT, 5秒内排空存量请求后退出 | -- |
+| R2.4 | `src/app/page.tsx` | 轮询暂停: `visibilitychange` 监听, 页面隐藏时暂停SSE/轮询, 恢复时续接 | -- |
+| R2.5 | `src/components/country-picker.tsx`, `model-picker.tsx`, `image-gallery.tsx` | 组件拆分 + `React.memo`: 细粒度重渲染控制, 减少父组件更新时的不必要渲染 | -- |
+| R2.6 | `src/components/image-gallery.tsx` | 图片懒加载: 所有 `<img>` 添加 `loading="lazy" decoding="async"` | -- |
+| R2.7 | `backend/main.py` | 过期任务回收: `reap_stale_tasks()` 后台协程, 每60秒清理 stuck >5min 的任务 | -- |
+| R2.8 | `src/middleware.ts` | `proxy-image` CORS: 根据 `Origin` 头动态返回 `Access-Control-Allow-Origin`, 支持图片跨域嵌入 | -- |
+| R2.9 | `backend/csrf.py`, `backend/main.py` | CSRF: 登录时 cookie 写入 `csrf_token` (JWT jti), 8个写端点验证 `X-CSRF-Token` 头匹配 cookie 值 | -- |
+
+### 关键设计
+
+**CircuitBreaker 状态机:**
+- CLOSED: 正常转发。连续失败计数 -> 5 触发 OPEN
+- OPEN: 立即拒绝请求。30秒后自动转入 HALF_OPEN
+- HALF_OPEN: 放行1个探测请求。成功 -> CLOSED(重置计数); 失败 -> OPEN(重置计时器)
+
+**CSRF Token 传递:**
+```
+登录成功 -> Set-Cookie: csrf_token=<jti>
+前端从 document.cookie 提取 jti -> 设置 X-CSRF-Token 头
+后端比较 X-CSRF-Token === cookie 中的 csrf_token
+8个受保护端点: POST/PUT/DELETE /admin/*, POST /admin/login, POST /generate/*
+```
+
+---
+
+## Round 3 — Architecture & Code Quality
+
+### 目标
+
+消除技术债务，提升代码架构质量、可维护性与部署安全性。
+
+### 改动清单
+
+| # | 文件 | 改动内容 | 状态 |
+|---|------|----------|------|
+| R3.1 | `src/lib/use-sse.ts`, `backend/sse.py` | **新建/重写** — SSE: 前端 `EventSource` 连接, 后端 `asyncio.Queue` pub/sub 推送, 替代前端轮询 | -- |
+| R3.2 | `src/app/admin/page.tsx` 及相关 admin 页面 | 移除 `eslint-disable any`: 所有 `any` 替换为精确 TypeScript 接口类型 | -- |
+| R3.3 | `src/lib/proxy.ts` | **新建** — 共享代理函数 `proxyToBackend()`: 统一处理转发、超时、CSRF Token 注入、错误包装 | -- |
+| R3.4 | `src/components/ui/modal.tsx` | **新建** — 通用 Modal 组件: overlay 半透明背景、Escape 键关闭、点击 backdrop 关闭、焦点捕获 | -- |
+| R3.5 | `.dockerignore` | **新建** — 排除 node_modules/.next/dist/\_\_pycache\_\_/venv/.git/.env 等构建无关文件 | -- |
+| R3.6 | `Dockerfile.backend` | 非 root 运行: 添加 `USER appuser`, 减小容器攻击面 | -- |
+| R3.7 | `docker-compose.yml` | `healthcheck` 配置 (各服务 30s 间隔/3次重试) + `deploy.resources.limits.memory` (前端512M/后端256M) | -- |
+| R3.8 | build 脚本 (`scripts/build.sh`) | 生产压缩: Next.js build 启用压缩 + tsup `minify: true` | -- |
+| R3.9 | 全仓库 | `catch(e){}` 静默捕获全部替换为 `logger.error(e)` 记录上下文 | -- |
+| R3.10 | `src/lib/logger.ts` | 生产日志门: `console.error` 在 production 下仅输出 `[ERROR]` 前缀, 抑制开发调试信息 | -- |
+| R3.11 | `backend/prompts_v2.py` | 常量迁移: `MODEL_STYLE_NAMES` 从 `main.py` 移至 `prompts_v2.py`, 与品类匹配逻辑同处一层 | -- |
+
+### 关键设计
+
+**SSE vs 轮询对比:**
+
+| 维度 | 轮询(旧) | SSE(新) |
+|------|----------|---------|
+| 实时性 | 3s 间隔(最差3s延迟) | 事件驱动(毫秒级) |
+| 服务端开销 | 每次查询DB | 仅推送变更 |
+| 网络开销 | 固定3s请求 | 仅变化时推送 |
+| 浏览器兼容 | 全兼容 | EventSource API |
+
+**非 root 容器安全性 (Dockerfile.backend):**
+```dockerfile
+RUN addgroup --system appuser && adduser --system --ingroup appuser appuser
+USER appuser
+```
+确保应用进程以非 root 身份运行，即使被攻陷也无法获得主机 root 权限。

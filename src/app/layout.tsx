@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import { Inspector } from 'react-dev-inspector';
+import { ToastProvider } from '@/components/ui/toast-provider';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -41,7 +42,7 @@ export default function RootLayout({
     <html lang="zh-CN" suppressHydrationWarning>
       <body className={`antialiased`}>
         {isDev && <Inspector />}
-        {children}
+        <ToastProvider>{children}</ToastProvider>
       </body>
     </html>
   );

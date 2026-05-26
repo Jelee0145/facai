@@ -2,6 +2,14 @@
 
 import { useState, useRef, useEffect } from "react";
 import { Progress } from "@/components/ui/progress";
+import { ErrorBoundary } from "@/components/ui/error-boundary";
+import { toast } from "@/components/ui/toast";
+import { fetchWithRetry } from "@/lib/fetch";
+import { CountryPicker } from "@/components/country-picker";
+import { ModelPicker } from "@/components/model-picker";
+import { useSSE } from "@/lib/use-sse";
+import { logger } from "@/lib/logger";
+import { Modal } from "@/components/ui/modal";
 
 const proxyImg = (url: string) => `/api/proxy-image?url=${encodeURIComponent(url)}`;
 
@@ -138,7 +146,6 @@ export default function HomePage() {
   const [newCustomTypeName, setNewCustomTypeName] = useState<string>("");
   const [newCustomTypeCategory, setNewCustomTypeCategory] = useState<string>("");
   const [editingCustomTypes, setEditingCustomTypes] = useState<boolean>(false);
-  const [loadingCustomTypes, setLoadingCustomTypes] = useState<boolean>(true);
 
   // 获取实际发送给后端的 product_type
   const getEffectiveProductType = () => {
@@ -161,6 +168,8 @@ export default function HomePage() {
   const [isTesting, setIsTesting] = useState<boolean>(false);
   const [testImage, setTestImage] = useState<string | null>(null);
   const [testStyleName, setTestStyleName] = useState<string>("");
+  const [testTitles, setTestTitles] = useState<string[]>([]);
+  const [testTags, setTestTags] = useState<string[]>([]);
 
   // 点击放大
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
@@ -172,18 +181,8 @@ export default function HomePage() {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [generationStatus, setGenerationStatus] = useState<string>("idle");
   const [latestImage, setLatestImage] = useState<string | null>(null);
-  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [currentTaskId, setCurrentTaskId] = useState<string | null>(null);
 
-  useEffect(() => {
-    return () => {
-      if (pollingRef.current) {
-        clearInterval(pollingRef.current);
-        pollingRef.current = null;
-      }
-    };
-  }, []);
-
-  // 从后端加载自定义类型
   useEffect(() => {
     fetch("/api/custom-types")
       .then((r) => r.json())
@@ -198,9 +197,51 @@ export default function HomePage() {
           );
         }
       })
-      .catch(() => {})
-      .finally(() => setLoadingCustomTypes(false));
+      .catch((e) => logger.error("Failed to load custom types:", e));
   }, []);
+
+  useSSE(currentTaskId, {
+    onProgress: (data: unknown) => {
+      const d = data as Record<string, unknown>;
+      const completed = typeof d.completed === "number" ? d.completed : 0;
+      const total = typeof d.total === "number" ? d.total : 14;
+      setCompletedCount(completed);
+      setProgressPercent(Math.round((completed / total) * 100));
+      const images = Array.isArray(d.images) ? d.images as Array<Record<string, unknown>> : null;
+      if (images) {
+        const lastCompleted = images.findLast(
+          (img) => img.status === "completed" && img.url
+        );
+        if (lastCompleted) {
+          setLatestImage(String(lastCompleted.url));
+        }
+      }
+    },
+    onComplete: (data: unknown) => {
+      const d = data as Record<string, unknown>;
+      const result = d.result as Record<string, unknown> | undefined;
+      const r = result?.data as Record<string, unknown> | undefined;
+      if (r) {
+        if (Array.isArray(r.modelImages)) setGeneratedImages(r.modelImages as string[]);
+        if (Array.isArray(r.titles)) setGeneratedTitles(r.titles as string[]);
+        if (Array.isArray(r.tags)) setGeneratedTags(r.tags as string[]);
+        if (typeof r.targetAudience === "string") setApplicableCrowd(r.targetAudience);
+        setShowTrending(true);
+        if (typeof r.comparisonImage === "string") setComparisonImage(r.comparisonImage);
+        if (typeof r.detailImage === "string") setDetailImage(r.detailImage);
+      }
+      setGenerationStatus("completed");
+      setProgressPercent(100);
+      setIsLoading(false);
+      setCurrentTaskId(null);
+    },
+    onError: (error: string) => {
+      setGenerationStatus("error");
+      setIsLoading(false);
+      setCurrentTaskId(null);
+      toast.error("生成失败: " + error);
+    },
+  });
 
   const filteredProducts = [...PRODUCT_TYPES, ...customTypes].filter(
     (p) => p.category === selectedCategory
@@ -229,7 +270,7 @@ export default function HomePage() {
 
   const handleGenerate = async () => {
     if (!uploadedImage) {
-      alert("请先上传商品图片");
+      toast.warning("请先上传商品图片");
       return;
     }
 
@@ -241,6 +282,8 @@ export default function HomePage() {
     setDetailImage(null);
     setTestImage(null);
     setTestStyleName("");
+    setTestTitles([]);
+    setTestTags([]);
     setProgressPercent(0);
     setCompletedCount(0);
     setTotalCount(14);
@@ -251,7 +294,7 @@ export default function HomePage() {
 
     try {
       // 1. 提交异步任务
-      const startRes = await fetch("/api/generate/async", {
+      const startRes = await fetchWithRetry("/api/generate/async", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -268,79 +311,10 @@ export default function HomePage() {
 
       const { task_id } = await startRes.json();
       setGenerationStatus("generating");
-
-      // 清除之前的轮询（防止重复点击）
-      if (pollingRef.current) {
-        clearInterval(pollingRef.current);
-        pollingRef.current = null;
-      }
-
-      // 2. 轮询进度（带 5 分钟超时）
-      const startTime = Date.now();
-      const POLL_TIMEOUT = 300_000;
-      pollingRef.current = setInterval(async () => {
-        const elapsed = Date.now() - startTime;
-        if (elapsed > POLL_TIMEOUT) {
-          clearInterval(pollingRef.current!);
-          pollingRef.current = null;
-          setGenerationStatus("error");
-          setIsLoading(false);
-          alert("生成超时，请重试");
-          return;
-        }
-
-        try {
-          const statusRes = await fetch(`/api/generate/status/${task_id}`);
-          if (!statusRes.ok) return;
-
-          const data = await statusRes.json();
-          const completed = data.completed || 0;
-          const total = data.total || 14;
-
-          setCompletedCount(completed);
-          setProgressPercent(Math.round((completed / total) * 100));
-          setElapsedSeconds(data.elapsed_seconds || 0);
-
-          const lastCompleted = data.images?.findLast(
-            (img: { status: string; url: string }) => img.status === "completed" && img.url
-          );
-          if (lastCompleted) {
-            setLatestImage(lastCompleted.url);
-            setGenerationStatus("generating");
-          }
-
-          if (data.status === "completed" && data.result) {
-            clearInterval(pollingRef.current!);
-            pollingRef.current = null;
-
-            const r = data.result.data;
-            setGeneratedImages(r.modelImages || []);
-            setGeneratedTitles(r.titles || []);
-            setGeneratedTags(r.tags || []);
-            setApplicableCrowd(r.targetAudience || "");
-            setShowTrending(true);
-            if (r.comparisonImage) setComparisonImage(r.comparisonImage);
-            if (r.detailImage) setDetailImage(r.detailImage);
-
-            setGenerationStatus("completed");
-            setProgressPercent(100);
-            setIsLoading(false);
-          }
-
-          if (data.status === "error") {
-            clearInterval(pollingRef.current!);
-            pollingRef.current = null;
-            setGenerationStatus("error");
-            setIsLoading(false);
-            alert("生成失败: " + (data.error || "未知错误"));
-          }
-        } catch (e) {
-          console.error("轮询出错:", e);
-        }
-      }, 1500);
+      setCurrentTaskId(task_id);
     } catch (error) {
-      console.error("生成失败:", error);
-      alert("生成失败，请重试");
+      logger.error("生成失败:", error);
+      toast.error("生成失败，请重试");
       setGenerationStatus("error");
       setIsLoading(false);
     }
@@ -348,16 +322,18 @@ export default function HomePage() {
 
   const handleQuickTest = async () => {
     if (!uploadedImage) {
-      alert("请先上传商品图片");
+      toast.warning("请先上传商品图片");
       return;
     }
 
     setTestImage(null);
     setTestStyleName("");
+    setTestTitles([]);
+    setTestTags([]);
     setIsTesting(true);
 
     try {
-      const res = await fetch("/api/generate", {
+      const res = await fetchWithRetry("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -373,11 +349,13 @@ export default function HomePage() {
       if (res.ok && data.success && data.data?.modelImages?.length > 0) {
         setTestImage(data.data.modelImages[0]);
         setTestStyleName(data.data.modelStyles?.[0] || "测试风格");
+        if (data.data.titles) setTestTitles(data.data.titles);
+        if (data.data.tags) setTestTags(data.data.tags);
       } else {
         alert("测试生成失败: " + (data.error || "未知错误"));
       }
     } catch (error) {
-      console.error("测试失败:", error);
+      logger.error("测试失败:", error);
       alert("测试生成失败，请重试");
     } finally {
       setIsTesting(false);
@@ -395,7 +373,7 @@ export default function HomePage() {
     setIsLoading(true);
 
     try {
-      const res = await fetch("/api/generate", {
+      const res = await fetchWithRetry("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -419,7 +397,7 @@ export default function HomePage() {
         alert(`单图生成失败: ${data.error || "未知错误"}`);
       }
     } catch (error) {
-      console.error("单图生成失败:", error);
+      logger.error("单图生成失败:", error);
       alert("单图生成失败，请重试");
     } finally {
       setIsLoading(false);
@@ -435,7 +413,7 @@ export default function HomePage() {
     const category = newCustomTypeCategory.trim() || "自定义";
 
     try {
-      const res = await fetch("/api/custom-types", {
+      const res = await fetchWithRetry("/api/custom-types", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ label: newCustomTypeName.trim(), category }),
@@ -457,7 +435,7 @@ export default function HomePage() {
       }
       setSelectedProduct(newType.code);
     } catch (e) {
-      console.error("添加自定义类型失败:", e);
+      logger.error("添加自定义类型失败:", e);
       alert("添加失败，请检查后端服务是否运行");
       return;
     }
@@ -472,10 +450,10 @@ export default function HomePage() {
     if (!idMatch) return;
 
     try {
-      const res = await fetch(`/api/custom-types?id=${idMatch[1]}`, { method: "DELETE" });
+      const res = await fetchWithRetry(`/api/custom-types?id=${idMatch[1]}`, { method: "DELETE" });
       if (!res.ok) throw new Error("删除失败");
     } catch (e) {
-      console.error("删除自定义类型失败:", e);
+      logger.error("删除自定义类型失败:", e);
       return;
     }
 
@@ -497,7 +475,7 @@ export default function HomePage() {
         setShowSuccess(false);
       }, 2000);
     } catch (err) {
-      console.error("复制失败:", err);
+      logger.error("复制失败:", err);
     }
   };
 
@@ -529,7 +507,7 @@ export default function HomePage() {
       
       canvas.toBlob(async (blob) => {
         if (!blob) {
-          console.error("无法创建图片blob");
+          logger.error("无法创建图片blob");
           downloadImage(imageUrl, `product_${index + 1}.png`);
           return;
         }
@@ -545,7 +523,7 @@ export default function HomePage() {
           setCopiedIndex(index);
           setTimeout(() => setCopiedIndex(null), 2000);
         } catch (err) {
-          console.error("复制失败，改为下载:", err);
+          logger.error("复制失败，改为下载:", err);
           downloadImage(imageUrl, `product_${index + 1}.png`);
           setCopiedIndex(index);
           setTimeout(() => setCopiedIndex(null), 2000);
@@ -553,7 +531,7 @@ export default function HomePage() {
       }, 'image/png');
       
     } catch (err) {
-      console.error("复制图片失败:", err);
+      logger.error("复制图片失败:", err);
       downloadImage(imageUrl, `product_${index + 1}.png`);
     }
   };
@@ -561,6 +539,7 @@ export default function HomePage() {
   const categories = [...new Set([...PRODUCT_TYPES, ...customTypes].map((p) => p.category))];
 
   return (
+    <ErrorBoundary>
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900">
       {/* 头部 */}
       <header className="border-b border-white/20 bg-white/5 backdrop-blur-lg sticky top-0 z-50">
@@ -589,52 +568,10 @@ export default function HomePage() {
       {/* 主内容 */}
       <main className="max-w-7xl mx-auto px-4 py-8">
         {/* 市场选择 */}
-        <section className="mb-8">
-          <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
-            <span>🌏</span> 选择目标市场
-          </h2>
-          <div className="grid grid-cols-3 md:grid-cols-5 lg:grid-cols-9 gap-3">
-            {COUNTRIES.map((country) => (
-              <button
-                key={country.code}
-                onClick={() => setSelectedCountry(country.code)}
-                className={`p-4 rounded-xl transition-all ${
-                  selectedCountry === country.code
-                    ? "bg-gradient-to-br from-purple-500 to-pink-500 text-white shadow-lg shadow-purple-500/30 scale-105"
-                    : "bg-white/10 text-white/80 hover:bg-white/20"
-                }`}
-              >
-                <div className="text-2xl mb-1">{country.flag}</div>
-                <div className="text-sm font-medium">{country.name}</div>
-                <div className="text-xs opacity-70">{country.currency}</div>
-              </button>
-            ))}
-          </div>
-        </section>
+        <CountryPicker countries={COUNTRIES} selected={selectedCountry} onSelect={setSelectedCountry} />
 
         {/* AI模型选择 */}
-        <section className="mb-8">
-          <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
-            <span>🤖</span> 选择AI模型
-          </h2>
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-            {MODELS.map((model) => (
-              <button
-                key={model.code}
-                onClick={() => setSelectedModel(model.code)}
-                className={`p-4 rounded-xl transition-all ${
-                  selectedModel === model.code
-                    ? "bg-gradient-to-br from-blue-500 to-cyan-500 text-white shadow-lg shadow-blue-500/30 scale-105"
-                    : "bg-white/10 text-white/80 hover:bg-white/20"
-                }`}
-              >
-                <div className="text-3xl mb-2">{model.icon}</div>
-                <div className="text-sm font-bold">{model.name}</div>
-                <div className="text-xs opacity-70 mt-1">{model.desc}</div>
-              </button>
-            ))}
-          </div>
-        </section>
+        <ModelPicker models={MODELS} selected={selectedModel} onSelect={setSelectedModel} />
 
         {/* 商品类型选择 */}
         <section className="mb-8">
@@ -753,6 +690,8 @@ export default function HomePage() {
                   src={uploadedImage}
                   alt="参考图预览"
                   className="max-h-48 rounded-lg mx-auto"
+                  loading="lazy"
+                  decoding="async"
                 />
                 <button
                   onClick={handleRemoveImage}
@@ -817,11 +756,38 @@ export default function HomePage() {
                   src={proxyImg(testImage)}
                   alt="测试生成"
                   className="w-full h-full object-cover hover:scale-105 transition-transform duration-300"
+                  loading="lazy"
+                  decoding="async"
                 />
               </div>
               <span className="text-white/40 text-xs cursor-pointer hover:text-white/70 transition-colors" onClick={() => setLightboxUrl(testImage)}>
                 点击放大
               </span>
+            </div>
+          )}
+          {testTitles.length > 0 && (
+            <div className="mt-4 bg-white/5 rounded-xl p-4 border border-white/10">
+              <div className="flex items-center gap-2 mb-3">
+                <span className="text-yellow-400 text-sm">🔥</span>
+                <span className="text-white text-sm font-medium">爆款标题</span>
+              </div>
+              <div className="space-y-1.5 mb-3">
+                {testTitles.map((t, i) => (
+                  <div key={i} className="flex items-center gap-2 text-sm text-white/80">
+                    <span className="text-white/40">{i + 1}.</span>
+                    <span>{t}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-pink-400 text-sm">🏷️</span>
+                <span className="text-white text-sm font-medium">爆款标签</span>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {testTags.map((t, i) => (
+                  <span key={i} className="px-2.5 py-1 bg-pink-600/40 text-white/90 text-xs rounded-full">#{t}</span>
+                ))}
+              </div>
             </div>
           )}
         </section>
@@ -865,6 +831,8 @@ export default function HomePage() {
                         src={proxyImg(latestImage)}
                         alt="最新生成"
                         className="w-full h-full object-cover"
+                        loading="lazy"
+                        decoding="async"
                       />
                       <div className="absolute inset-0 bg-gradient-to-t from-black/40 to-transparent flex items-end justify-center">
                         <span className="text-[8px] text-white pb-0.5">完成!</span>
@@ -902,6 +870,8 @@ export default function HomePage() {
                     src={proxyImg(imgUrl)}
                     alt={`生成的图片 ${index + 1}`}
                     className="w-full aspect-square object-cover group-hover:scale-105 transition-transform duration-300"
+                    loading="lazy"
+                    decoding="async"
                   />
                   {/* 风格编号 */}
                   <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-1.5">
@@ -1015,6 +985,8 @@ export default function HomePage() {
                     src={proxyImg(comparisonImage)}
                     alt="产品对比图"
                     className="w-full"
+                    loading="lazy"
+                    decoding="async"
                   />
                   <div className="p-4 flex gap-2">
                     <button
@@ -1046,6 +1018,8 @@ export default function HomePage() {
                     src={proxyImg(detailImage)}
                     alt="细节放大图"
                     className="w-full"
+                    loading="lazy"
+                    decoding="async"
                   />
                   <div className="p-4 flex gap-2">
                     <button
@@ -1070,118 +1044,107 @@ export default function HomePage() {
       </main>
 
       {/* 自定义类型弹窗 */}
-      {showCustomTypeModal && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-800 rounded-2xl p-6 w-full max-w-md border border-white/10">
-            <h3 className="text-xl font-bold text-white mb-4">添加自定义类型</h3>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-white/80 text-sm mb-2">类型名称</label>
-                <input
-                  type="text"
-                  value={newCustomTypeName}
-                  onChange={(e) => setNewCustomTypeName(e.target.value)}
-                  placeholder="如：瑜伽垫、运动水壶"
-                  className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-white/50 focus:outline-none focus:border-purple-500"
-                />
-              </div>
-              <div>
-                <label className="block text-white/80 text-sm mb-2">所属分类（可选）</label>
-                <input
-                  type="text"
-                  value={newCustomTypeCategory}
-                  onChange={(e) => setNewCustomTypeCategory(e.target.value)}
-                  placeholder="如：运动、户外（新分类会自动创建）"
-                  className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-white/50 focus:outline-none focus:border-purple-500"
-                />
-              </div>
-            </div>
-            <div className="flex gap-3 mt-6">
-              <button
-                onClick={() => setShowCustomTypeModal(false)}
-                className="flex-1 py-3 bg-white/10 hover:bg-white/20 text-white rounded-lg font-medium transition-all"
-              >
-                取消
-              </button>
-              <button
-                onClick={handleAddCustomType}
-                className="flex-1 py-3 bg-gradient-to-r from-green-500 to-emerald-500 hover:opacity-90 text-white rounded-lg font-medium transition-all"
-              >
-                添加
-              </button>
-            </div>
+      <Modal open={showCustomTypeModal} title="添加自定义类型" onClose={() => setShowCustomTypeModal(false)} containerClassName="w-full max-w-md">
+        <div className="space-y-4">
+          <div>
+            <label className="block text-white/80 text-sm mb-2">类型名称</label>
+            <input
+              type="text"
+              value={newCustomTypeName}
+              onChange={(e) => setNewCustomTypeName(e.target.value)}
+              placeholder="如：瑜伽垫、运动水壶"
+              className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-white/50 focus:outline-none focus:border-purple-500"
+            />
+          </div>
+          <div>
+            <label className="block text-white/80 text-sm mb-2">所属分类（可选）</label>
+            <input
+              type="text"
+              value={newCustomTypeCategory}
+              onChange={(e) => setNewCustomTypeCategory(e.target.value)}
+              placeholder="如：运动、户外（新分类会自动创建）"
+              className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-white/50 focus:outline-none focus:border-purple-500"
+            />
           </div>
         </div>
-      )}
+        <div className="flex gap-3 mt-6">
+          <button
+            onClick={() => setShowCustomTypeModal(false)}
+            className="flex-1 py-3 bg-white/10 hover:bg-white/20 text-white rounded-lg font-medium transition-all"
+          >
+            取消
+          </button>
+          <button
+            onClick={handleAddCustomType}
+            className="flex-1 py-3 bg-gradient-to-r from-green-500 to-emerald-500 hover:opacity-90 text-white rounded-lg font-medium transition-all"
+          >
+            添加
+          </button>
+        </div>
+      </Modal>
 
       {/* 爆款标题弹窗 */}
-      {showTrending && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-800 rounded-2xl p-6 w-full max-w-2xl border border-white/10 max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-xl font-bold text-white">
-                📝 {currentCountry?.name}市场爆款标题
-              </h3>
-              <button
-                onClick={() => setShowTrending(false)}
-                className="text-white/60 hover:text-white text-2xl"
+      <Modal open={showTrending} onClose={() => setShowTrending(false)} containerClassName="w-full max-w-2xl" noHeader>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-xl font-bold text-white">
+            📝 {currentCountry?.name}市场爆款标题
+          </h3>
+          <button
+            onClick={() => setShowTrending(false)}
+            className="text-white/60 hover:text-white text-2xl"
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="mb-6">
+          <h4 className="text-white font-medium mb-3">🔥 爆款标题</h4>
+          <div className="space-y-2">
+            {generatedTitles.map((title, index) => (
+              <div
+                key={index}
+                className="flex items-center gap-2 p-3 bg-white/5 rounded-lg"
               >
-                ×
-              </button>
-            </div>
-
-            {/* 爆款标题 */}
-            <div className="mb-6">
-              <h4 className="text-white font-medium mb-3">🔥 爆款标题</h4>
-              <div className="space-y-2">
-                {generatedTitles.map((title, index) => (
-                  <div
-                    key={index}
-                    className="flex items-center gap-2 p-3 bg-white/5 rounded-lg"
-                  >
-                    <span className="text-white/60 text-sm">{index + 1}.</span>
-                    <span className="flex-1 text-white">{title}</span>
-                    <button
-                      onClick={() => copyToClipboard(title, index)}
-                      className="px-3 py-1 bg-purple-500/50 hover:bg-purple-500 text-white text-sm rounded transition-all"
-                    >
-                      {copiedTitleIndex === index ? "已复制" : "复制"}
-                    </button>
-                  </div>
-                ))}
+                <span className="text-white/60 text-sm">{index + 1}.</span>
+                <span className="flex-1 text-white">{title}</span>
+                <button
+                  onClick={() => copyToClipboard(title, index)}
+                  className="px-3 py-1 bg-purple-500/50 hover:bg-purple-500 text-white text-sm rounded transition-all"
+                >
+                  {copiedTitleIndex === index ? "已复制" : "复制"}
+                </button>
               </div>
-            </div>
-
-            {/* 爆款标签 */}
-            <div>
-              <h4 className="text-white font-medium mb-3">🏷️ 爆款标签</h4>
-              <div className="flex flex-wrap gap-2">
-                {generatedTags.map((tag, index) => (
-                  <button
-                    key={index}
-                    onClick={() => copyToClipboard(`#${tag}`, index + 10)}
-                    className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
-                      copiedTitleIndex === index + 10
-                        ? "bg-green-500 text-white"
-                        : "bg-gradient-to-r from-pink-600/60 to-purple-600/60 hover:from-pink-500 hover:to-purple-500 text-white shadow-lg shadow-pink-500/20"
-                    }`}
-                  >
-                    <span className="font-bold text-amber-300">#</span>
-                    {tag}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <button
-              onClick={() => setShowTrending(false)}
-              className="w-full mt-6 py-3 bg-white/10 hover:bg-white/20 text-white rounded-lg font-medium transition-all"
-            >
-              关闭
-            </button>
+            ))}
           </div>
         </div>
-      )}
+
+        <div>
+          <h4 className="text-white font-medium mb-3">🏷️ 爆款标签</h4>
+          <div className="flex flex-wrap gap-2">
+            {generatedTags.map((tag, index) => (
+              <button
+                key={index}
+                onClick={() => copyToClipboard(`#${tag}`, index + 10)}
+                className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
+                  copiedTitleIndex === index + 10
+                    ? "bg-green-500 text-white"
+                    : "bg-gradient-to-r from-pink-600/60 to-purple-600/60 hover:from-pink-500 hover:to-purple-500 text-white shadow-lg shadow-pink-500/20"
+                }`}
+              >
+                <span className="font-bold text-amber-300">#</span>
+                {tag}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <button
+          onClick={() => setShowTrending(false)}
+          className="w-full mt-6 py-3 bg-white/10 hover:bg-white/20 text-white rounded-lg font-medium transition-all"
+        >
+          关闭
+        </button>
+      </Modal>
 
       {/* 成功提示 */}
       {showSuccess && (
@@ -1207,6 +1170,8 @@ export default function HomePage() {
             alt="放大查看"
             className="max-w-full max-h-full object-contain rounded-lg cursor-default"
             onClick={(e) => e.stopPropagation()}
+            loading="lazy"
+            decoding="async"
           />
         </div>
       )}
@@ -1219,5 +1184,6 @@ export default function HomePage() {
         </div>
       </footer>
     </div>
+    </ErrorBoundary>
   );
 }

@@ -13,7 +13,7 @@ import uuid
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 import httpx
 import traceback
@@ -30,10 +30,14 @@ from prompts_v2 import (
     build_comparison_prompt,
     build_detail_prompt,
     COUNTRY_CONFIG,
+    MODEL_STYLE_NAMES,
 )
 from key_manager import key_manager
 from security import authenticate, login, sanitize_input, refresh_token, TOKEN_EXPIRE_DAYS, JWT_EXPIRE_MINUTES
-from middleware import init_rate_limiting, limiter
+from middleware import init_rate_limiting
+from csrf import verify_csrf
+from sse import sse_stream, push_event
+from middleware import limiter
 from database import (
     get_all_keys, get_all_keys_masked, add_key as db_add_key,
     update_key as db_update_key,
@@ -114,16 +118,30 @@ async def global_exception_handler(request: Request, exc: Exception):
 async def startup():
     """启动时恢复未完成任务，清理过期数据"""
     init_db()
+    # production safety: refuse to start without API_AUTH_TOKEN
+    if os.getenv("NODE_ENV", "").lower() == "production" and not API_AUTH_TOKEN:
+        print("[SECURITY] CRITICAL: NODE_ENV=production but API_AUTH_TOKEN is not set!")
+        print("[SECURITY] Set API_AUTH_TOKEN in backend/.env and .env (frontend)")
+        sys.exit(1)
     # 自动 seed 管理员
     try:
         from database import get_user, create_user
         from security import hash_password
-        admin_pw = os.getenv("ADMIN_PASSWORD", "admin123")
+        import secrets
+        admin_pw = os.getenv("ADMIN_PASSWORD") or secrets.token_urlsafe(12)
         if not get_user("admin"):
             create_user("admin", hash_password(admin_pw))
-            print(f"[INIT] 管理员已创建 (密码: {admin_pw})")
+            print("[INIT] Admin account created (password saved to backend/.env)")
+            # write password to .env if not already set
+            env_path = os.path.join(os.path.dirname(__file__) or ".", ".env")
+            if not os.getenv("ADMIN_PASSWORD"):
+                try:
+                    with open(env_path, "a" if os.path.exists(env_path) else "w", encoding="utf-8") as f:
+                        f.write(f"\nADMIN_PASSWORD={admin_pw}\n")
+                except Exception:
+                    print(f"  [WARN] Could not write ADMIN_PASSWORD to {env_path}")
         else:
-            print("[INIT] 管理员已存在")
+            print("[INIT] Admin account exists")
     except Exception as e:
         print(f"[INIT] 管理员创建失败: {e}")
     # 自动导入 API Key
@@ -138,11 +156,31 @@ async def startup():
     delete_old_tasks(hours=24)
     pending = load_pending_tasks()
     if pending:
-        print(f"♻️ 恢复 {len(pending)} 个未完成任务")
+        print(f"[RECOVERY] Restoring {len(pending)} pending tasks")
         task_store.update(pending)
 
+    # 启动僵死任务回收协程
+    async def reap_stale_tasks():
+        """每60秒扫描一次，将僵死超过5分钟的task标记为error"""
+        while True:
+            await asyncio.sleep(60)
+            now = time.time()
+            stale_ids = []
+            for tid, task in list(task_store.items()):
+                if task.get("status") == "generating":
+                    elapsed = now - task.get("start_time", now)
+                    if elapsed > 300:  # 5 minutes
+                        stale_ids.append(tid)
+            for tid in stale_ids:
+                task_store[tid]["status"] = "error"
+                task_store[tid]["error"] = "Task timed out (no progress for >5 minutes)"
+            if stale_ids:
+                print(f"[REAPER] Marked {len(stale_ids)} stale task(s) as error")
 
-CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5000").split(",")
+    asyncio.create_task(reap_stale_tasks())
+
+
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:4524").split(",")
 cors_origins = [o.strip() for o in CORS_ORIGINS]
 if "*" in cors_origins and len(cors_origins) == 1:
     print("[WARN] CORS allow_origins=* 与 allow_credentials=True 冲突，浏览器将拒绝携带 Cookie 的请求")
@@ -311,7 +349,7 @@ async def apimart_batch_generate(
     on_progress: 可选回调 (index, url) — 每完成一张图时调用
     """
     total = len(tasks)
-    print(f"\n🎨 apimart 批量生成: 提交 {total} 个任务 (并发 {MAX_CONCURRENT})...")
+    print(f"\n[BATCH] apimart batch generate: submitting {total} tasks (concurrency {MAX_CONCURRENT})...")
 
     # Step 1: 分批提交
     submissions = []  # [(index, task_id)]
@@ -329,7 +367,7 @@ async def apimart_batch_generate(
 
     task_ids = [tid for _, tid in submissions]
     task_map = {tid: idx for idx, tid in submissions}
-    print(f"\n📊 已提交: {len(task_ids)}/{total}，等待处理...")
+    print(f"\n[PROGRESS] Submitted: {len(task_ids)}/{total}, waiting for processing...")
 
     if not task_ids:
         return [fallback_url] * total
@@ -455,9 +493,9 @@ async def generate_images(request: Request, req: GenerateRequest, _=Depends(veri
         model_profile = get_model_profile(model_code)
         country_config = COUNTRY_CONFIG.get(req.country, COUNTRY_CONFIG["usa"])
 
-        print(f"🚀 开始处理: {req.product_type} → {category['name']}")
-        print(f"   📦 品类: {category['parent']} | 🎯 模型: {model_profile['name']} ({model_profile['tagline']})")
-        print(f"   🌍 市场: {country_config['name']} ({country_config['platform']}) | 📸 拍摄方式: {category['shot_type']}")
+        print(f"[START] Processing: {req.product_type} -> {category['name']}")
+        print(f"   [CATEGORY] {category['parent']} | [MODEL] {model_profile['name']} ({model_profile['tagline']})")
+        print(f"   [MARKET] {country_config['name']} ({country_config['platform']}) | [SHOT] {category['shot_type']}")
 
         # LLM 智能分析（失败时静默降级）
         llm_config = None
@@ -488,14 +526,14 @@ async def generate_images(request: Request, req: GenerateRequest, _=Depends(veri
                 )
                 if llm_config:
                     llm_response_data = json.dumps(llm_config, ensure_ascii=False)
-                    print(f"  🤖 LLM 分析成功")
+                    print(f"  [LLM] Analysis successful")
             except Exception as e:
-                print(f"  ⚠️ LLM 分析失败（降级至模板）: {e}")
+                print(f"  [WARN] LLM analysis failed (downgrading to template): {e}")
 
         # 2. 单图生成模式
         if req.generate_type == "comparison":
             prompt = build_comparison_prompt(req.product_type, category)
-            print("🔄 生成对比图...")
+            print("[COMPARISON] Generating comparison image...")
             url = await apimart_generate(prompt, req.image_url, req.prompt_size, req.prompt_resolution)
             add_history(task_id=task_id, api_key_id=None, product_type=sanitize_input(req.product_type, 50),
                         country=sanitize_input(req.country, 20), model=model_code, status="completed", elapsed_seconds=round(time.time() - start, 1))
@@ -503,7 +541,7 @@ async def generate_images(request: Request, req: GenerateRequest, _=Depends(veri
 
         if req.generate_type == "detail":
             prompt = build_detail_prompt(req.product_type, category)
-            print("🔍 生成细节图...")
+            print("[DETAIL] Generating detail image...")
             url = await apimart_generate(prompt, req.image_url, req.prompt_size, req.prompt_resolution)
             add_history(task_id=task_id, api_key_id=None, product_type=sanitize_input(req.product_type, 50),
                         country=sanitize_input(req.country, 20), model=model_code, status="completed", elapsed_seconds=round(time.time() - start, 1))
@@ -511,7 +549,7 @@ async def generate_images(request: Request, req: GenerateRequest, _=Depends(veri
 
         if req.generate_type == "test":
             idx = max(0, min(req.style_index, 10))
-            print(f"🧪 测试模式: 生成第 {idx+1}/11 张模特图...")
+            print(f"[TEST] Test mode: generating image {idx+1}/11...")
             gen_result = generate_all_tasks(
                 req.product_type, req.image_url, req.country, req.model,
                 req.prompt_size, req.prompt_resolution,
@@ -525,11 +563,7 @@ async def generate_images(request: Request, req: GenerateRequest, _=Depends(veri
                 req.prompt_size, req.prompt_resolution,
             )
             model_profile = gen_result["model_profile"]
-            model_styles = [
-                "时尚街拍风", "都市休闲风", "杂志大片风", "生活方式风",
-                "自信站姿风", "活力户外风", "职业商务风", "海滩度假风",
-                "艺术优雅风", "运动活力风", "奢华时尚风",
-            ]
+            model_styles = MODEL_STYLE_NAMES
             tasks_detail = _build_tasks_detail(gen_result["tasks"], [url])
             add_history(task_id=task_id, api_key_id=None, product_type=sanitize_input(req.product_type, 50),
                         country=sanitize_input(req.country, 20), model=model_code, status="completed",
@@ -545,6 +579,10 @@ async def generate_images(request: Request, req: GenerateRequest, _=Depends(veri
                     "category": gen_result["category"],
                     "model": model_profile,
                     "country": gen_result["country_config"],
+                    "titles": gen_result.get("titles", []),
+                    "tags": gen_result.get("tags", []),
+                    "description": gen_result.get("description", ""),
+                    "targetAudience": gen_result.get("target_audience", ""),
                 },
             }
 
@@ -572,18 +610,14 @@ async def generate_images(request: Request, req: GenerateRequest, _=Depends(veri
                     success_count=success_count, status="completed", elapsed_seconds=round(elapsed, 1),
                     llm_request=llm_request_data, llm_response=llm_response_data,
                     tasks_detail=tasks_detail)
-        print(f"✅ 完成！总耗时 {elapsed:.1f}s")
+        print(f"[DONE] Completed! Elapsed {elapsed:.1f}s")
 
         return {
             "success": True,
             "data": {
             "originalImage": req.image_url,
             "modelImages": model_images,
-            "modelStyles": [
-                "时尚街拍风", "都市休闲风", "杂志大片风", "生活方式风",
-                "自信站姿风", "活力户外风", "职业商务风", "海滩度假风",
-                "艺术优雅风", "运动活力风", "奢华时尚风",
-            ],
+            "modelStyles": MODEL_STYLE_NAMES,
             "displayImage": white_bg_url,
             "comparisonImage": comparison_url,
             "detailImage": detail_url,
@@ -618,7 +652,7 @@ async def generate_images(request: Request, req: GenerateRequest, _=Depends(veri
         },
     }
     except Exception as e:
-        print(f"❌ 同步任务 {task_id} 失败: {e}")
+        print(f"[ERROR] Sync task {task_id} failed: {e}")
         add_history(task_id=task_id, api_key_id=None, product_type=sanitize_input(req.product_type, 50),
                     country=sanitize_input(req.country, 20), model="", status="failed", error_msg=str(e)[:500])
         return {"success": False, "error": str(e)}
@@ -631,6 +665,7 @@ async def _run_generation_background(task_id: str, req: GenerateRequest):
     try:
         progress = task_store[task_id]
         progress["status"] = "submitting"
+        push_event(task_id, {"status": "submitting", "total": progress["total"], "completed": 0})
 
         # 品类匹配
         category = match_category(req.product_type)
@@ -667,9 +702,9 @@ async def _run_generation_background(task_id: str, req: GenerateRequest):
                 )
                 if llm_config:
                     llm_response_data = json.dumps(llm_config, ensure_ascii=False)
-                    print(f"  🤖 LLM 分析成功: {len(llm_config.get('scene_config', {}).get('scenes', []))} 个场景, {len(llm_config.get('metadata', {}).get('titles', []))} 条标题")
+                    print(f"  [LLM] Analysis successful: {len(llm_config.get('scene_config', {}).get('scenes', []))} scenes, {len(llm_config.get('metadata', {}).get('titles', []))} titles")
             except Exception as e:
-                print(f"  ⚠️ LLM 分析失败（降级至模板）: {e}")
+                print(f"  [WARN] LLM analysis failed (downgrading to template): {e}")
 
         # 生成任务
         gen_result = generate_all_tasks(
@@ -697,9 +732,19 @@ async def _run_generation_background(task_id: str, req: GenerateRequest):
                 img["status"] = "failed"
             p["status"] = "generating"
             save_task_progress(task_id, p)
+            push_event(task_id, {
+                "status": "generating",
+                "total": p["total"],
+                "completed": p["completed"],
+                "images": [
+                    {"index": img["index"], "status": img["status"], "url": img.get("url"), "name": img["name"]}
+                    for img in p["images"]
+                ],
+            })
 
         progress["status"] = "generating"
         save_task_progress(task_id, progress)
+        push_event(task_id, {"status": "generating", "total": progress["total"], "completed": 0})
 
         # 批量生成
         urls = await apimart_batch_generate(
@@ -719,11 +764,7 @@ async def _run_generation_background(task_id: str, req: GenerateRequest):
             "data": {
                 "originalImage": req.image_url,
                 "modelImages": model_images,
-                "modelStyles": [
-                    "时尚街拍风", "都市休闲风", "杂志大片风", "生活方式风",
-                    "自信站姿风", "活力户外风", "职业商务风", "海滩度假风",
-                    "艺术优雅风", "运动活力风", "奢华时尚风",
-                ],
+                "modelStyles": MODEL_STYLE_NAMES,
                 "displayImage": white_bg_url,
                 "comparisonImage": comparison_url,
                 "detailImage": detail_url,
@@ -738,7 +779,8 @@ async def _run_generation_background(task_id: str, req: GenerateRequest):
         }
         progress["status"] = "completed"
         save_task_progress(task_id, progress)
-        print(f"✅ 后台任务 {task_id} 完成")
+        push_event(task_id, {"status": "completed", "result": progress["result"]})
+        print(f"[DONE] Background task {task_id} completed")
 
         # 写入历史记录
         tasks_detail_json = _build_tasks_detail(gen_result["tasks"], urls)
@@ -760,12 +802,13 @@ async def _run_generation_background(task_id: str, req: GenerateRequest):
         )
 
     except Exception as e:
-        print(f"❌ 后台任务 {task_id} 失败: {e}")
+        print(f"[ERROR] Background task {task_id} failed: {e}")
         p = task_store.get(task_id)
         if p:
             p["status"] = "error"
             p["error"] = str(e)
             save_task_progress(task_id, p)
+            push_event(task_id, {"status": "failed", "error": str(e)})
         add_history(
             task_id=task_id,
             api_key_id=None,
@@ -785,7 +828,7 @@ async def generate_async(request: Request, req: GenerateRequest, _=Depends(verif
     client_ip = request.client.host if request.client else "unknown"
     task_id = init_progress(14, creator_ip=client_ip)
     asyncio.create_task(_run_generation_background(task_id, req))
-    print(f"🚀 后台任务已启动: {task_id} (IP: {client_ip})")
+    print(f"[START] Background task created: {task_id} (IP: {client_ip})")
     return {"task_id": task_id}
 
 
@@ -814,6 +857,22 @@ async def generate_status(request: Request, task_id: str, _=Depends(verify_api_a
         "result": p.get("result"),
         "error": p.get("error"),
     }
+
+
+@app.get("/api/generate/status/{task_id}/stream")
+async def generate_status_stream(request: Request, task_id: str, _=Depends(verify_api_auth)):
+    """SSE 实时进度流"""
+    if task_id not in task_store:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return StreamingResponse(
+        sse_stream(task_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ========== 自定义产品类型持久化 ==========
@@ -849,9 +908,12 @@ async def remove_custom_type(request: Request, type_id: int):
 @app.post("/admin/login")
 @limiter.limit("5/minute")
 async def admin_login(request: Request, req: LoginRequest):
-    """管理员登录 — 返回 JSON + 设置 HttpOnly Cookie"""
+    """管理员登录 — 返回 JSON (含 csrf_token) + 设置 HttpOnly Cookie"""
     username = sanitize_input(req.username, 50)
     result = await login(username, req.password)
+    from security import verify_token
+    payload = verify_token(result["access_token"])
+    result["csrf_token"] = payload["jti"] if payload else ""
     resp = JSONResponse(content=result)
     resp.set_cookie(
         key="access_token",
@@ -868,7 +930,11 @@ async def admin_login(request: Request, req: LoginRequest):
 @app.get("/admin/me")
 async def admin_me(user: dict = Depends(authenticate)):
     """获取当前登录用户信息 — 用于前端初始化检测会话"""
-    return {"username": user.get("sub"), "role": user.get("role")}
+    return {
+        "username": user.get("sub"),
+        "role": user.get("role"),
+        "csrf_token": user.get("jti", ""),
+    }
 
 
 @app.post("/admin/refresh")
@@ -894,7 +960,7 @@ async def admin_refresh(user: dict = Depends(authenticate)):
 
 
 @app.post("/admin/logout")
-async def admin_logout():
+async def admin_logout(request: Request, _csrf=Depends(verify_csrf)):
     """登出 — 清除 cookie"""
     resp = JSONResponse(content={"message": "已登出"})
     resp.set_cookie(
@@ -927,7 +993,7 @@ async def list_api_keys(show_full: bool = False, user: dict = Depends(authentica
 
 @app.post("/admin/api-keys")
 @limiter.limit("10/minute")
-async def create_api_key(request: Request, req: dict, user: dict = Depends(authenticate)):
+async def create_api_key(request: Request, req: dict, user: dict = Depends(authenticate), _csrf=Depends(verify_csrf)):
     """添加 API Key"""
     key_value = sanitize_input(req.get("key_value", ""), 500)
     name = sanitize_input(req.get("name", ""), 100)
@@ -940,7 +1006,7 @@ async def create_api_key(request: Request, req: dict, user: dict = Depends(authe
 
 @app.put("/admin/api-keys/{key_id}")
 @limiter.limit("10/minute")
-async def modify_api_key(request: Request, key_id: int, req: dict, user: dict = Depends(authenticate)):
+async def modify_api_key(request: Request, key_id: int, req: dict, user: dict = Depends(authenticate), _csrf=Depends(verify_csrf)):
     """更新 API Key"""
     kwargs = {}
     if "name" in req:
@@ -957,7 +1023,7 @@ async def modify_api_key(request: Request, key_id: int, req: dict, user: dict = 
 
 @app.delete("/admin/api-keys/{key_id}")
 @limiter.limit("10/minute")
-async def remove_api_key(request: Request, key_id: int, user: dict = Depends(authenticate)):
+async def remove_api_key(request: Request, key_id: int, user: dict = Depends(authenticate), _csrf=Depends(verify_csrf)):
     """删除 API Key"""
     ok = db_delete_key(key_id)
     if not ok:
@@ -1031,7 +1097,7 @@ async def get_llm_config(user: dict = Depends(authenticate)):
 
 @app.put("/admin/llm-config")
 @limiter.limit("10/minute")
-async def update_llm_config(request: Request, body: dict, user: dict = Depends(authenticate)):
+async def update_llm_config(request: Request, body: dict, user: dict = Depends(authenticate), _csrf=Depends(verify_csrf)):
     """更新 LLM 配置"""
     if "api_key" in body:
         val = body["api_key"].strip()
@@ -1050,7 +1116,7 @@ async def update_llm_config(request: Request, body: dict, user: dict = Depends(a
 
 @app.post("/admin/llm-config/test")
 @limiter.limit("5/minute")
-async def test_llm_config(request: Request, body: dict, user: dict = Depends(authenticate)):
+async def test_llm_config(request: Request, body: dict, user: dict = Depends(authenticate), _csrf=Depends(verify_csrf)):
     """测试 LLM 连接"""
     raw_key = body.get("api_key", "").strip()
     # 如果前端发的 key 是脱敏后的（含 ****），用数据库里的真实 key

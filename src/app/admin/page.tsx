@@ -1,22 +1,55 @@
 "use client";
-/* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { useState, useEffect } from "react";
 import { useAuth } from "./auth-context";
+import { logger } from "@/lib/logger";
+
+interface KeyHealth {
+  id: number;
+  name: string;
+  today_used: number;
+  daily_limit: number;
+  fail_count: number;
+  usage_pct: number;
+}
+
+interface DashboardStats {
+  active_keys: number;
+  total_keys: number;
+  today_generations: number;
+  today_success_rate: number;
+  today_avg_time: number;
+  total_generations: number;
+  keys_health?: { keys: KeyHealth[] };
+}
 
 export default function DashboardPage() {
   const { fetchWithAuth } = useAuth();
-  const [stats, setStats] = useState<any>(null);
+  const [stats, setStats] = useState<DashboardStats | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const load = () => {
+    setError(null);
     fetchWithAuth("/api/admin/dashboard")
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
+        return r.json() as Promise<DashboardStats>;
       })
       .then(setStats)
-      .catch(() => {});
-  }, [fetchWithAuth]);
+      .catch((e) => {
+        setError("加载失败");
+        logger.error("Failed to load dashboard:", e);
+      });
+  };
+
+  useEffect(() => { load(); }, [fetchWithAuth]);
+
+  if (error) return (
+    <div className="text-red-400 bg-red-900/30 border border-red-800 rounded-xl p-4">
+      加载失败，请检查网络连接
+      <button onClick={load} className="ml-3 underline hover:text-red-300">重试</button>
+    </div>
+  );
 
   if (!stats) return <div className="text-gray-400">加载中...</div>;
 
@@ -45,7 +78,7 @@ export default function DashboardPage() {
 
       <h2 className="text-lg font-semibold mb-4">🔑 Key 使用状态</h2>
       <div className="space-y-3">
-        {(stats.keys_health?.keys || []).map((k: any) => (
+        {(stats.keys_health?.keys || []).map((k: KeyHealth) => (
           <div key={k.id} className="bg-gray-900 border border-gray-800 rounded-lg p-4">
             <div className="flex items-center justify-between mb-2">
               <span className="font-medium">{k.name}</span>

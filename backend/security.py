@@ -12,7 +12,12 @@ from typing import Optional
 from fastapi import HTTPException, Request
 from database import get_user, record_login_attempt
 
-JWT_SECRET = os.getenv("JWT_SECRET", "change-me-in-production")
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET:
+    print("[SECURITY] CRITICAL: JWT_SECRET environment variable is not set!")
+    print("[SECURITY] Generate one: python -c \"import secrets; print(secrets.token_hex(32))\"")
+    print("[SECURITY] Set it in backend/.env: JWT_SECRET=<the generated value>")
+    sys.exit(1)
 JWT_ALGORITHM = "HS256"
 TOKEN_EXPIRE_DAYS = 1
 JWT_EXPIRE_MINUTES = TOKEN_EXPIRE_DAYS * 24 * 60
@@ -20,11 +25,6 @@ JWT_REFRESH_MINUTES = 7 * 24 * 60  # 刷新 token 有效期 7 天
 LOGIN_MAX_ATTEMPTS = 5
 LOGIN_LOCK_MINUTES = 15
 
-if JWT_SECRET == "change-me-in-production":
-    print("[SECURITY] CRITICAL: JWT_SECRET 环境变量未设置！")
-    print("[SECURITY] 请执行: python -c \"import secrets; print(secrets.token_hex(32))\"")
-    print("[SECURITY] 将输出值设为环境变量 JWT_SECRET")
-    sys.exit(1)
 
 
 def hash_password(password: str) -> str:

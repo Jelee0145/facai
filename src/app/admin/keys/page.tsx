@@ -1,41 +1,60 @@
 "use client";
-/* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { useState, useEffect } from "react";
 import { useAuth } from "../auth-context";
+import { toast } from "@/components/ui/toast";
+import { logger } from "@/lib/logger";
+
+interface ApiKey {
+  id: number;
+  key_value: string;
+  name: string;
+  is_active: boolean;
+  today_used: number;
+  daily_limit: number;
+  fail_count: number;
+}
 
 export default function KeysPage() {
   const { fetchWithAuth } = useAuth();
-  const [keys, setKeys] = useState<any[]>([]);
+  const [keys, setKeys] = useState<ApiKey[]>([]);
   const [showAdd, setShowAdd] = useState(false);
   const [newKey, setNewKey] = useState({ key_value: "", name: "", daily_limit: 200 });
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
   const load = () => {
+    setLoading(true);
+    setError(null);
     fetchWithAuth("/api/admin/api-keys")
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
+        return r.json() as Promise<{ keys: ApiKey[] }>;
       })
       .then((d) => setKeys(d.keys || []))
-      .catch(() => {});
+      .catch((e) => {
+        setError("加载失败");
+        logger.error("Failed to load API keys:", e);
+      })
+      .finally(() => setLoading(false));
   };
 
   useEffect(() => { load(); }, []);
 
   const addKey = async () => {
-    if (!newKey.key_value.trim()) return alert("Key 值不能为空");
+    if (!newKey.key_value.trim()) { toast.warning("Key 值不能为空"); return; }
     try {
       const r = await fetchWithAuth("/api/admin/api-keys", { method: "POST", body: JSON.stringify(newKey) });
       if (!r.ok) {
-        const err = await r.json().catch(() => ({}));
-        alert(err.detail || "添加失败");
+        const err: Record<string, unknown> = await r.json().catch(() => ({}));
+        toast.error(String(err.detail || "添加失败"));
         return;
       }
       setNewKey({ key_value: "", name: "", daily_limit: 200 });
       setShowAdd(false);
       load();
     } catch {
-      alert("网络错误");
+      toast.error("网络错误");
     }
   };
 
@@ -89,6 +108,13 @@ export default function KeysPage() {
         </div>
       )}
 
+      {error && (
+        <div className="bg-red-900/30 border border-red-800 rounded-xl p-4 mb-6 text-red-400">
+          加载失败，请检查网络连接
+          <button onClick={load} className="ml-3 underline hover:text-red-300">重试</button>
+        </div>
+      )}
+
       <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
         <table className="w-full text-sm">
           <thead className="bg-gray-800/50">
@@ -127,7 +153,10 @@ export default function KeysPage() {
                 </td>
               </tr>
             ))}
-            {keys.length === 0 && (
+            {loading && (
+              <tr><td colSpan={6} className="px-4 py-8 text-center text-gray-500">加载中...</td></tr>
+            )}
+            {!loading && keys.length === 0 && (
               <tr><td colSpan={6} className="px-4 py-8 text-center text-gray-500">暂无 API Key</td></tr>
             )}
           </tbody>
