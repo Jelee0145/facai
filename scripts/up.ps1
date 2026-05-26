@@ -119,6 +119,103 @@ function Ensure-EnvFiles {
     }
 }
 
+# ─── Windows Job Object: 确保关闭终端时子进程也被终止 ───
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class JobObject {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    public static extern IntPtr CreateJobObject(IntPtr lpJobAttributes, string lpName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool SetInformationJobObject(IntPtr hJob, int JobObjectInfoType,
+        IntPtr lpJobObjectInfo, uint cbJobObjectInfoLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool CloseHandle(IntPtr hObject);
+
+    public const int JobObjectExtendedLimitInformation = 9;
+    public const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct IO_COUNTERS {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+        public IO_COUNTERS IoInfo;
+        public uint ProcessMemoryLimit;
+        public uint JobMemoryLimit;
+        public uint PeakProcessMemoryUsed;
+        public uint PeakJobMemoryUsed;
+    }
+
+    public static IntPtr CreateKillOnClose() {
+        IntPtr job = CreateJobObject(IntPtr.Zero, null);
+        var limit = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+        limit.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        int size = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+        IntPtr ptr = Marshal.AllocHGlobal(size);
+        Marshal.StructureToPtr(limit, ptr, false);
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, ptr, (uint)size);
+        Marshal.FreeHGlobal(ptr);
+        return job;
+    }
+
+    public static bool Assign(IntPtr hJob, IntPtr hProcess) {
+        return AssignProcessToJobObject(hJob, hProcess);
+    }
+}
+"@
+
+$JobHandle = [JobObject]::CreateKillOnClose()
+
+function Test-HealthEndpoint {
+    param([string]$Url, [string]$Name, [int]$TimeoutSeconds = 30)
+    Write-Host "  Waiting for $Name at $Url ..." -ForegroundColor Cyan
+    $start = Get-Date
+    while (((Get-Date) - $start).TotalSeconds -lt $TimeoutSeconds) {
+        try {
+            $r = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 3
+            if ($r.StatusCode -eq 200) {
+                $elapsed = [int]((Get-Date) - $start).TotalSeconds
+                Write-Host "  $Name is ready. (${elapsed}s)" -ForegroundColor Green
+                return $true
+            }
+        } catch {
+            # Not ready yet
+        }
+        Write-Host "." -NoNewline
+        Start-Sleep -Seconds 2
+    }
+    Write-Host ""
+    Write-Host "  ERROR: $Name failed to start within ${TimeoutSeconds}s." -ForegroundColor Red
+    return $false
+}
+
 Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host "  One-click start: F+A Generation Tool" -ForegroundColor Cyan
 Write-Host "=========================================" -ForegroundColor Cyan
@@ -144,17 +241,29 @@ Stop-ProcessOnPort $BackendPort
 Stop-ProcessOnPort $FrontendPort
 
 Write-Host "[6/8] Starting FastAPI backend (port $BackendPort)..." -ForegroundColor Cyan
-$backendJob = Start-Job -ScriptBlock {
-    param($root, $port)
-    Set-Location "$root\backend"
-    uvicorn main:app --host 0.0.0.0 --port $port --reload
-} -ArgumentList $ProjectRoot, $BackendPort
+$backendCwd = Join-Path $ProjectRoot "backend"
+$backendProc = Start-Process -NoNewWindow -PassThru -FilePath "python" `
+    -ArgumentList "-m uvicorn main:app --host 0.0.0.0 --port $BackendPort --reload" `
+    -WorkingDirectory $backendCwd
 
-Start-Sleep -Seconds 3
-$backendOut = Receive-Job -Job $backendJob 2>&1
-if ($backendOut) { Write-Host $backendOut -ForegroundColor Gray }
+# Assign to Job Object: 关闭终端时自动杀掉此进程
+if ($JobHandle -and $backendProc -and !$backendProc.HasExited) {
+    [JobObject]::Assign($JobHandle, $backendProc.Handle) | Out-Null
+}
 
+if (-not (Test-HealthEndpoint "http://localhost:$BackendPort/health" "Backend" 30)) {
+    if ($backendProc -and !$backendProc.HasExited) {
+        $backendProc.Kill()
+        $backendProc.WaitForExit(3000)
+    }
+    Write-Host "  Backend failed to start. Check logs above." -ForegroundColor Red
+    exit 1
+}
+
+Write-Host ""
 Write-Host "[7/8] Starting Next.js frontend (port $FrontendPort)..." -ForegroundColor Cyan
+$frontendUrl = "http://localhost:$FrontendPort"
+Write-Host "  Open $frontendUrl in your browser." -ForegroundColor Green
 Write-Host ""
 Write-Host "Press Ctrl+C to stop all services." -ForegroundColor Magenta
 Write-Host ""
@@ -166,7 +275,10 @@ try {
 }
 finally {
     Write-Host "Stopping backend..." -ForegroundColor Yellow
-    Stop-Job -Job $backendJob -ErrorAction SilentlyContinue
-    Remove-Job -Job $backendJob -ErrorAction SilentlyContinue
+    if ($backendProc -and !$backendProc.HasExited) {
+        $backendProc.Kill()
+        $backendProc.WaitForExit(5000)
+        $backendProc.Dispose()
+    }
     Write-Host "All services stopped." -ForegroundColor Green
 }

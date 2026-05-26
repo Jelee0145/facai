@@ -11,7 +11,7 @@
 
 ## 架构要点
 
-- **双服务架构**: Next.js 前端 (port 5000) + FastAPI 后端 (port 8001)
+- **双服务架构**: Next.js 前端 (port 4524) + FastAPI 后端 (port 8001)
 - **API 代理**: `src/app/api/generate/route.ts` 将 `/api/generate/*` 转发到 FastAPI 后端
 - **前端也直连后端**: 前端页面 (`page.tsx`) 直接 fetch `http://localhost:8001` 进行异步生成
 - **主页面**: "发财计划" — TikTok Shop 九国跨境电商 AI 图片生成工具
@@ -27,7 +27,7 @@
 ## 关键命令
 
 ```bash
-# 前端开发 (port 5000) — tsx watch + 自定义 server
+# 前端开发 (port 4524) — tsx watch + 自定义 server
 bash ./scripts/dev.sh
 
 # 前端构建 (Next.js build + tsup 打包 server.ts 到 dist/server.js)
@@ -94,6 +94,8 @@ cd backend && python test_prompts.py
 │   ├── csrf.py             # CSRF 保护中间件
 │   ├── middleware.py       # 中间件 (CORS, 限流, 请求日志)
 │   ├── llm_provider.py     # LLM 提供商抽象层
+│   ├── llm_prompts.py      # LLM 提示词模板
+│   ├── llm_schema.py       # LLM 输出 schema
 │   ├── .env.example        # 环境变量示例
 │   └── data.db             # SQLite 数据库 (自动创建)
 ├── scripts/                # 构建/启动脚本 (bash/PowerShell)
