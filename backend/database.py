@@ -134,9 +134,7 @@ def load_pending_tasks() -> dict[str, dict]:
 
 def delete_old_tasks(hours: int = 24):
     db = get_db()
-    from datetime import datetime, timedelta, timezone
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-    db.execute("DELETE FROM task_store WHERE created_at < ?", (cutoff,))
+    db.execute("DELETE FROM task_store WHERE created_at < datetime('now', ?)", (f"-{int(hours)} hours",))
     db.commit()
 
 
@@ -192,16 +190,16 @@ def update_key(key_id: int, **kwargs) -> bool:
     updates["updated_at"] = datetime.now().isoformat()
     set_clause = ", ".join(f"{k} = ?" for k in updates)
     vals = list(updates.values()) + [key_id]
-    db.execute(f"UPDATE api_keys SET {set_clause} WHERE id = ?", vals)
+    cur = db.execute(f"UPDATE api_keys SET {set_clause} WHERE id = ?", vals)
     db.commit()
-    return True
+    return cur.rowcount > 0
 
 
 def delete_key(key_id: int) -> bool:
     db = get_db()
-    db.execute("DELETE FROM api_keys WHERE id = ?", (key_id,))
+    cur = db.execute("DELETE FROM api_keys WHERE id = ?", (key_id,))
     db.commit()
-    return db.total_changes > 0
+    return cur.rowcount > 0
 
 
 def mark_key_used(key_id: int) -> bool:
@@ -450,9 +448,9 @@ def add_custom_type(label: str, category: str) -> int:
 
 def delete_custom_type(type_id: int) -> bool:
     db = get_db()
-    db.execute("DELETE FROM custom_product_types WHERE id = ?", (type_id,))
+    cur = db.execute("DELETE FROM custom_product_types WHERE id = ?", (type_id,))
     db.commit()
-    return db.total_changes > 0
+    return cur.rowcount > 0
 
 
 # ========== 初始化 ==========

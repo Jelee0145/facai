@@ -1,13 +1,13 @@
 "use client";
 
-import { createContext, useContext, useState, useEffect, useRef, ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "@/components/ui/toast";
 
 interface AuthContextType {
   user: Record<string, unknown> | null;
   isLoading: boolean;
   login: (username: string, password: string) => Promise<boolean>;
-  logout: () => void;
+  logout: () => Promise<void>;
   fetchWithAuth: (url: string, options?: RequestInit) => Promise<Response>;
 }
 
@@ -15,7 +15,7 @@ const AuthContext = createContext<AuthContextType>({
   user: null,
   isLoading: true,
   login: async () => false,
-  logout: () => { },
+  logout: async () => {},
   fetchWithAuth: async () => new Response(),
 });
 
@@ -24,7 +24,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(true);
   const csrfTokenRef = useRef("");
 
-  // 初始化时通过 /api/admin/me 检测会话状态
   useEffect(() => {
     fetch("/api/admin/me")
       .then((r) => {
@@ -47,10 +46,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         body: JSON.stringify({ username, password }),
       });
       if (!resp.ok) {
-        const err = await resp.json().catch(() => ({})) as Record<string, unknown>;
+        const err = (await resp.json().catch(() => ({}))) as Record<string, unknown>;
         toast.error(String(err.detail || "登录失败"));
         return false;
       }
+
       const data = await resp.json();
       if (data.csrf_token) csrfTokenRef.current = data.csrf_token;
       const userObj = data.user || { username: data.username, role: data.role };
@@ -62,32 +62,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const logout = async () => {
-    try {
-      await fetch("/api/admin/logout", { method: "POST" });
-    } catch {
-      // 即使后端不可达也清除前端状态
-    }
-    setUser(null);
-  };
-
   const fetchWithAuth = async (url: string, options: RequestInit = {}): Promise<Response> => {
     const headers: Record<string, string> = {
-      ...(options.headers as Record<string, string> || {}),
+      ...((options.headers as Record<string, string>) || {}),
     };
+
     if (options.body && !headers["Content-Type"]) {
       headers["Content-Type"] = "application/json";
     }
-    // inject CSRF token for state-changing requests
+
     const method = (options.method || "GET").toUpperCase();
     if (["POST", "PUT", "DELETE"].includes(method) && csrfTokenRef.current) {
       headers["X-CSRF-Token"] = csrfTokenRef.current;
     }
+
     const resp = await fetch(url, { ...options, headers });
     if (resp.status === 401) {
+      csrfTokenRef.current = "";
       setUser(null);
     }
     return resp;
+  };
+
+  const logout = async () => {
+    try {
+      const resp = await fetchWithAuth("/api/admin/logout", { method: "POST" });
+      if (!resp.ok && resp.status !== 401) {
+        throw new Error("logout failed");
+      }
+      csrfTokenRef.current = "";
+      setUser(null);
+    } catch {
+      toast.error("退出失败，请重试");
+    }
   };
 
   return (

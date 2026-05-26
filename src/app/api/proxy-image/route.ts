@@ -94,8 +94,15 @@ export async function GET(request: NextRequest) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
 
-    const resp = await fetch(targetUrl.toString(), { signal: controller.signal });
+    const resp = await fetch(targetUrl.toString(), {
+      signal: controller.signal,
+      redirect: "manual",
+    });
     clearTimeout(timer);
+
+    if (resp.status >= 300 && resp.status < 400) {
+      return NextResponse.json({ error: "Redirects are not allowed" }, { status: 403 });
+    }
 
     if (!resp.ok) {
       return NextResponse.json({ error: "Upstream fetch failed" }, { status: 502 });

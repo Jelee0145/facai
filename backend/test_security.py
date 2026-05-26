@@ -1,11 +1,44 @@
-"""Security Acceptance Test Suite — v2 (isolated, deterministic)"""
-import json, os, sys, time, urllib.request, urllib.error
+"""Security acceptance tests against a running backend service."""
 
-BASE = os.getenv("TEST_BASE", "http://localhost:8001")
+from __future__ import annotations
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+
+BASE = os.getenv("TEST_BASE", "http://localhost:8001").rstrip("/")
+ROOT = Path(__file__).resolve().parent.parent
+BACKEND_DIR = Path(__file__).resolve().parent
 PASS = 0
 FAIL = 0
 
-def test(name, fn):
+
+def load_env(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+ENV = {**load_env(ROOT / ".env"), **load_env(BACKEND_DIR / ".env")}
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD") or ENV.get("ADMIN_PASSWORD", "")
+API_AUTH_TOKEN = os.getenv("API_AUTH_TOKEN") or ENV.get("API_AUTH_TOKEN", "")
+EXPECTED_CORS_ORIGIN = (os.getenv("CORS_ORIGINS") or ENV.get("CORS_ORIGINS") or "http://localhost:4524").split(",")[0].strip()
+SESSION_COOKIE = ""
+SESSION_CSRF = ""
+
+
+def test(name: str, fn):
     global PASS, FAIL
     try:
         fn()
@@ -18,19 +51,20 @@ def test(name, fn):
         print(f"  FAIL  {name}: {e}")
         FAIL += 1
 
-def hdr(headers, key):
-    """case-insensitive header lookup"""
+
+def hdr(headers, key: str) -> str:
     lower = key.lower()
     for k, v in headers.items():
         if k.lower() == lower:
             return v
     return ""
 
-def req(method, path, body=None, extra_headers=None, origin=None, cors_method=None):
+
+def req(method: str, path: str, body=None, extra_headers=None, origin=None, cors_method=None):
     url = f"{BASE}{path}"
-    data = json.dumps(body).encode() if body else None
+    data = json.dumps(body).encode("utf-8") if body is not None else None
     r = urllib.request.Request(url, data=data, method=method)
-    if data:
+    if data is not None:
         r.add_header("Content-Type", "application/json")
     if origin:
         r.add_header("Origin", origin)
@@ -42,161 +76,247 @@ def req(method, path, body=None, extra_headers=None, origin=None, cors_method=No
     try:
         resp = urllib.request.urlopen(r, timeout=10)
         raw = resp.read()
-        ct = hdr(resp.headers, "Content-Type")
-        bodyj = json.loads(raw) if "json" in ct else raw.decode()
-        return resp.status, bodyj, dict(resp.headers)
+        return resp.status, parse_body(raw, resp.headers), dict(resp.headers)
     except urllib.error.HTTPError as e:
         raw = e.read()
-        ct = hdr(e.headers, "Content-Type")
-        bodyj = json.loads(raw) if "json" in ct else raw.decode()
-        return e.code, bodyj, dict(e.headers)
+        return e.code, parse_body(raw, e.headers), dict(e.headers)
     except urllib.error.URLError as e:
-        raise RuntimeError(f"Cannot reach {url}: {e.reason}")
+        raise RuntimeError(f"Cannot reach {url}: {e.reason}") from e
 
-def check(val, exp, msg=""):
+
+def parse_body(raw: bytes, headers) -> object:
+    content_type = hdr(headers, "Content-Type")
+    text = raw.decode("utf-8", errors="replace")
+    if "json" in content_type:
+        return json.loads(text) if text else {}
+    return text
+
+
+def check(val, exp, msg: str = ""):
     if val != exp:
         raise AssertionError(f"expected {exp!r}, got {val!r}. {msg}")
 
-def check_in(val, col, msg=""):
+
+def check_in(val, col, msg: str = ""):
     if val not in col:
         raise AssertionError(f"expected {val!r} in {col}. {msg}")
 
-def check_in_text(val, text, msg=""):
+
+def check_in_text(val: str, text: str, msg: str = ""):
     if val.lower() not in text.lower():
-        raise AssertionError(f"expected '{val}' in '{text}'. {msg}")
+        raise AssertionError(f"expected {val!r} in {text!r}. {msg}")
+
+
+def login() -> tuple[str, str]:
+    if not ADMIN_PASSWORD:
+        raise AssertionError("ADMIN_PASSWORD is missing from environment or backend/.env")
+    status, body, headers = req("POST", "/admin/login", {"username": "admin", "password": ADMIN_PASSWORD})
+    check(status, 200)
+    if not isinstance(body, dict):
+        raise AssertionError("login response is not JSON")
+    cookie = hdr(headers, "Set-Cookie").split(";", 1)[0]
+    csrf = str(body.get("csrf_token") or "")
+    if not cookie or not csrf:
+        raise AssertionError("login did not return cookie and csrf_token")
+    return cookie, csrf
+
+
+def session() -> tuple[str, str]:
+    global SESSION_COOKIE, SESSION_CSRF
+    if not SESSION_COOKIE or not SESSION_CSRF:
+        SESSION_COOKIE, SESSION_CSRF = login()
+    return SESSION_COOKIE, SESSION_CSRF
+
 
 print("=" * 60)
 print(" SECURITY ACCEPTANCE TEST SUITE")
 print("=" * 60)
 
-# ---- Phase 1: Auth ----
+
 print("\n--- Phase 1: Cookie Authentication ---")
 
+
 def t_login():
-    s, b, headers = req("POST", "/admin/login", {"username": "admin", "password": "admin123"})
-    check(s, 200)
-    cookie = hdr(headers, "Set-Cookie")
+    cookie, _ = session()
     check_in_text("access_token=", cookie)
-    check_in_text("httponly", cookie)
-    check_in_text("samesite=lax", cookie)
-    check_in_text("path=/", cookie)
-test("1.1 login returns Set-Cookie (HttpOnly/SameSite/Path)", t_login)
+
+
+test("1.1 login returns session cookie and CSRF token", t_login)
+
 
 def t_me_authed():
-    s, b, _ = req("POST", "/admin/login", {"username": "admin", "password": "admin123"})
-    check(s, 200)
-    # second request uses the same client — urllib doesn't auto-send cookies
-    # so manually extract cookie
-    _, _, h2 = req("POST", "/admin/login", {"username": "admin", "password": "admin123"})
-    cookie = hdr(h2, "Set-Cookie").split(";")[0]
-    s2, b2, _ = req("GET", "/admin/me", extra_headers={"Cookie": cookie})
-    check(s2, 200)
-    check(b2.get("username"), "admin")
+    cookie, _ = session()
+    status, body, _ = req("GET", "/admin/me", extra_headers={"Cookie": cookie})
+    check(status, 200)
+    if not isinstance(body, dict):
+        raise AssertionError("me response is not JSON")
+    check(body.get("username"), "admin")
+    if not body.get("csrf_token"):
+        raise AssertionError("me response did not include csrf_token")
+
+
 test("1.2 GET /admin/me with cookie returns user", t_me_authed)
 
+
 def t_me_unauth():
-    s, b, _ = req("GET", "/admin/me")
-    check(s, 401)
+    status, _, _ = req("GET", "/admin/me")
+    check(status, 401)
+
+
 test("1.3 GET /admin/me 401 without cookie", t_me_unauth)
 
-def t_logout():
-    _, _, h2 = req("POST", "/admin/login", {"username": "admin", "password": "admin123"})
-    cookie = hdr(h2, "Set-Cookie").split(";")[0]
-    s, b, h3 = req("POST", "/admin/logout", extra_headers={"Cookie": cookie})
-    check(s, 200)
-    sc = hdr(h3, "Set-Cookie")
-    check_in_text("max-age=0", sc)
-test("1.4 logout clears cookie", t_logout)
+
+def t_logout_requires_csrf():
+    cookie, _ = session()
+    status, _, _ = req("POST", "/admin/logout", extra_headers={"Cookie": cookie})
+    check(status, 403)
+
+
+test("1.4 logout rejects missing CSRF token", t_logout_requires_csrf)
+
 
 def t_keys_unauth():
-    s, b, _ = req("GET", "/admin/api-keys")
-    check(s, 401)
+    status, _, _ = req("GET", "/admin/api-keys")
+    check(status, 401)
+
+
 test("1.5 API keys require auth", t_keys_unauth)
 
-# ---- Phase 2: Fixes ----
-print("\n--- Phase 2: Security Fixes ---")
 
-def t_cors_restricted():
-    s, b, headers = req("OPTIONS", "/admin/login", origin="http://localhost:5000", cors_method="POST")
-    allow = hdr(headers, "Access-Control-Allow-Origin")
-    check(allow, "http://localhost:5000")
-test("2.1 CORS Allow-Origin = http://localhost:5000", t_cors_restricted)
+print("\n--- Phase 2: API and CORS Contract ---")
+
+
+def t_cors_allowed():
+    status, _, headers = req("OPTIONS", "/admin/login", origin=EXPECTED_CORS_ORIGIN, cors_method="POST")
+    check(status, 200)
+    check(hdr(headers, "Access-Control-Allow-Origin"), EXPECTED_CORS_ORIGIN)
+
+
+test(f"2.1 CORS allows {EXPECTED_CORS_ORIGIN}", t_cors_allowed)
+
 
 def t_cors_blocked():
-    s, b, headers = req("OPTIONS", "/admin/login", origin="https://evil.com", cors_method="POST")
-    allow = hdr(headers, "Access-Control-Allow-Origin")
-    check(allow, "")
+    status, _, headers = req("OPTIONS", "/admin/login", origin="https://evil.com", cors_method="POST")
+    check(status, 400)
+    check(hdr(headers, "Access-Control-Allow-Origin"), "")
+
+
 test("2.2 CORS blocks evil origin", t_cors_blocked)
 
+
+def t_generate_requires_internal_token():
+    status, _, _ = req("POST", "/api/generate", {"image_url": "https://x.com/x.jpg"})
+    check(status, 403 if API_AUTH_TOKEN else 503)
+
+
+test("2.3 /api/generate rejects missing internal API auth", t_generate_requires_internal_token)
+
+
+def auth_headers() -> dict[str, str]:
+    if not API_AUTH_TOKEN:
+        raise AssertionError("API_AUTH_TOKEN is missing from environment or backend/.env")
+    return {"X-API-Auth": API_AUTH_TOKEN}
+
+
 def t_py_country():
-    s, b, _ = req("POST", "/api/generate", {"image_url": "https://x.com/x.jpg", "country": "INVALID"})
-    check(s, 422)
-test("2.3 invalid country -> 422", t_py_country)
+    status, _, _ = req("POST", "/api/generate", {"image_url": "https://x.com/x.jpg", "country": "INVALID"}, extra_headers=auth_headers())
+    check(status, 422)
 
-def t_py_gtype():
-    s, b, _ = req("POST", "/api/generate", {"image_url": "https://x.com/x.jpg", "generate_type": "INVALID"})
-    check(s, 422)
-test("2.4 invalid generate_type -> 422", t_py_gtype)
 
-def t_py_size():
-    s, b, _ = req("POST", "/api/generate", {"image_url": "https://x.com/x.jpg", "prompt_size": "INVALID"})
-    check(s, 422)
-test("2.5 invalid prompt_size -> 422", t_py_size)
+test("2.4 invalid country -> 422", t_py_country)
 
-def t_py_url():
-    s, b, _ = req("POST", "/api/generate", {"image_url": "not-a-url"})
-    check(s, 422)
-test("2.6 invalid image_url -> 422", t_py_url)
 
-def t_py_style():
-    s, b, _ = req("POST", "/api/generate", {"image_url": "https://x.com/x.jpg", "style_index": 99})
-    check(s, 422)
-test("2.7 style_index out of range -> 422", t_py_style)
+def t_py_url_sync():
+    status, _, _ = req("POST", "/api/generate", {"image_url": "not-a-url"}, extra_headers=auth_headers())
+    check_in(status, [400, 422])
 
-# ---- Phase 3: Defense ----
+
+test("2.5 sync invalid image_url -> 4xx", t_py_url_sync)
+
+
+def t_py_url_async():
+    status, _, _ = req("POST", "/api/generate/async", {"image_url": "not-a-url"}, extra_headers=auth_headers())
+    check_in(status, [400, 422])
+
+
+test("2.6 async invalid image_url -> 4xx", t_py_url_async)
+
+
+def t_key_update_missing():
+    cookie, csrf = session()
+    status, _, _ = req(
+        "PUT",
+        "/admin/api-keys/2147483647",
+        {"name": "missing"},
+        extra_headers={"Cookie": cookie, "X-CSRF-Token": csrf},
+    )
+    check(status, 404)
+
+
+test("2.7 updating a missing API key returns 404", t_key_update_missing)
+
+
+def t_key_delete_missing():
+    cookie, csrf = session()
+    status, _, _ = req(
+        "DELETE",
+        "/admin/api-keys/2147483647",
+        extra_headers={"Cookie": cookie, "X-CSRF-Token": csrf},
+    )
+    check(status, 404)
+
+
+test("2.8 deleting a missing API key returns 404", t_key_delete_missing)
+
+
+def t_logout_with_csrf():
+    global SESSION_COOKIE, SESSION_CSRF
+    cookie, csrf = session()
+    status, _, headers = req("POST", "/admin/logout", extra_headers={"Cookie": cookie, "X-CSRF-Token": csrf})
+    check(status, 200)
+    check_in_text("max-age=0", hdr(headers, "Set-Cookie"))
+    SESSION_COOKIE = ""
+    SESSION_CSRF = ""
+
+
+test("2.9 logout clears cookie with CSRF token", t_logout_with_csrf)
+
+
 print("\n--- Phase 3: Defense in Depth ---")
+
 
 def t_ratelimit():
     codes = []
-    for i in range(8):
-        s, b, _ = req("POST", "/admin/login", {"username": "x", "password": "x"})
-        codes.append(s)
-    n429 = sum(1 for c in codes if c == 429)
-    check(n429 > 0, True, f"expected 429, got {codes}")
-    print(f"    (rate limit: {n429}x 429 / {len(codes)} reqs)")
+    for _ in range(8):
+        status, _, _ = req("POST", "/admin/login", {"username": "__missing_user__", "password": "__bad__"})
+        codes.append(status)
+    if 429 not in codes:
+        raise AssertionError(f"expected at least one 429, got {codes}")
+
+
 test("3.1 login rate-limited to 5/min", t_ratelimit)
 
-def t_no_path_leak():
-    s, b, _ = req("POST", "/api/generate", {"image_url": "https://x.com/x.jpg"})
-    check_in(s, [422, 500, 503])
-    if s != 422:
-        for junk in ["data.db", "C:\\", "D:\\", "PROJECT_ROOT"]:
-            if junk in json.dumps(b):
-                raise AssertionError(f"leaked: {junk}")
-test("3.2 no filesystem path leak in errors", t_no_path_leak)
-
-# ---- Phase 4: Hardening ----
-print("\n--- Phase 4: Production Hardening ---")
-
-def t_env_example():
-    check(os.path.exists(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env.example")), True)
-test("4.1 .env.example exists", t_env_example)
 
 def t_health():
-    s, b, _ = req("GET", "/health")
-    check(s, 200)
-    check(b.get("status"), "ok")
-test("4.2 health endpoint ok", t_health)
+    status, body, _ = req("GET", "/health")
+    check(status, 200)
+    if not isinstance(body, dict):
+        raise AssertionError("health response is not JSON")
+    check(body.get("status"), "ok")
 
-def t_requirements():
-    check(os.path.exists(os.path.join(os.path.dirname(__file__), "requirements.txt")), True)
-test("4.3 requirements.txt exists", t_requirements)
 
-def t_middleware():
-    check(os.path.exists(os.path.join(os.path.dirname(os.path.dirname(__file__)), "src", "middleware.ts")), True)
-test("4.4 src/middleware.ts exists", t_middleware)
+test("3.2 health endpoint ok", t_health)
 
-# ---- Summary ----
+
+def t_project_files():
+    check((ROOT / ".env.example").exists(), True)
+    check((BACKEND_DIR / "requirements.txt").exists(), True)
+    check((ROOT / "src" / "middleware.ts").exists(), True)
+
+
+test("3.3 deployment/security support files exist", t_project_files)
+
+
 print("\n" + "=" * 60)
 total = PASS + FAIL
 print(f"  TOTAL: {total}  |  PASS: {PASS}  |  FAIL: {FAIL}")

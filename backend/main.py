@@ -9,6 +9,7 @@ import json
 import re
 import time
 import os
+import sys
 import uuid
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Request, Depends
@@ -174,6 +175,8 @@ async def startup():
             for tid in stale_ids:
                 task_store[tid]["status"] = "error"
                 task_store[tid]["error"] = "Task timed out (no progress for >5 minutes)"
+                save_task_progress(tid, task_store[tid])
+                push_event(tid, {"status": "failed", "error": task_store[tid]["error"]})
             if stale_ids:
                 print(f"[REAPER] Marked {len(stale_ids)} stale task(s) as error")
 
@@ -245,6 +248,17 @@ def init_progress(total: int, creator_ip: str = "") -> str:
     }
     save_task_progress(tid, task_store[tid])
     return tid
+
+
+def get_task_for_request(task_id: str, request: Request) -> dict:
+    p = task_store.get(task_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="任务不存在或已过期")
+
+    client_ip = request.client.host if request.client else "unknown"
+    if p.get("creator_ip") and p["creator_ip"] != "unknown" and p["creator_ip"] != client_ip:
+        raise HTTPException(status_code=404, detail="任务不存在或已过期")
+    return p
 
 
 # ========== Apimart API 工具函数 ==========
@@ -651,11 +665,16 @@ async def generate_images(request: Request, req: GenerateRequest, _=Depends(veri
             "tags": gen_result.get("tags", country_config["hashtags"]),
         },
     }
+    except HTTPException as e:
+        print(f"[ERROR] Sync task {task_id} failed: {e.detail}")
+        add_history(task_id=task_id, api_key_id=None, product_type=sanitize_input(req.product_type, 50),
+                    country=sanitize_input(req.country, 20), model="", status="failed", error_msg=str(e.detail)[:500])
+        raise
     except Exception as e:
         print(f"[ERROR] Sync task {task_id} failed: {e}")
         add_history(task_id=task_id, api_key_id=None, product_type=sanitize_input(req.product_type, 50),
                     country=sanitize_input(req.country, 20), model="", status="failed", error_msg=str(e)[:500])
-        return {"success": False, "error": str(e)}
+        return JSONResponse(status_code=500, content={"success": False, "error": "Internal server error"})
 
 
 # ========== 异步进度端点 ==========
@@ -836,13 +855,7 @@ async def generate_async(request: Request, req: GenerateRequest, _=Depends(verif
 @limiter.limit("30/minute")
 async def generate_status(request: Request, task_id: str, _=Depends(verify_api_auth)):
     """查询实时进度（仅允许任务创建者查询）"""
-    p = task_store.get(task_id)
-    if not p:
-        raise HTTPException(status_code=404, detail="任务不存在或已过期")
-
-    client_ip = request.client.host if request.client else "unknown"
-    if p.get("creator_ip") and p["creator_ip"] != "unknown" and p["creator_ip"] != client_ip:
-        raise HTTPException(status_code=404, detail="任务不存在或已过期")
+    p = get_task_for_request(task_id, request)
 
     elapsed = time.time() - p["start_time"]
     return {
@@ -862,8 +875,7 @@ async def generate_status(request: Request, task_id: str, _=Depends(verify_api_a
 @app.get("/api/generate/status/{task_id}/stream")
 async def generate_status_stream(request: Request, task_id: str, _=Depends(verify_api_auth)):
     """SSE 实时进度流"""
-    if task_id not in task_store:
-        raise HTTPException(status_code=404, detail="任务不存在")
+    get_task_for_request(task_id, request)
     return StreamingResponse(
         sse_stream(task_id),
         media_type="text/event-stream",
