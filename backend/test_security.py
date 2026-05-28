@@ -34,8 +34,15 @@ ENV = {**load_env(ROOT / ".env"), **load_env(BACKEND_DIR / ".env")}
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD") or ENV.get("ADMIN_PASSWORD", "")
 API_AUTH_TOKEN = os.getenv("API_AUTH_TOKEN") or ENV.get("API_AUTH_TOKEN", "")
 EXPECTED_CORS_ORIGIN = (os.getenv("CORS_ORIGINS") or ENV.get("CORS_ORIGINS") or "http://localhost:4524").split(",")[0].strip()
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() in ("true", "1", "yes")
 SESSION_COOKIE = ""
 SESSION_CSRF = ""
+
+# Test customer credentials (fixed for idempotent re-runs)
+TEST_USER_USERNAME = os.getenv("TEST_USER_USERNAME", "security-test-user")
+TEST_USER_PASSWORD = os.getenv("TEST_USER_PASSWORD", "Test!User1Pass")
+USER_SESSION_COOKIE = ""
+USER_SESSION_CSRF = ""
 
 
 def test(name: str, fn):
@@ -111,7 +118,10 @@ def login() -> tuple[str, str]:
     if not ADMIN_PASSWORD:
         raise AssertionError("ADMIN_PASSWORD is missing from environment or backend/.env")
     status, body, headers = req("POST", "/admin/login", {"username": "admin", "password": ADMIN_PASSWORD})
-    check(status, 200)
+    if status == 500:
+        resp_body = body if isinstance(body, str) else json.dumps(body)
+        raise AssertionError(f"admin login returned 500 (bad hash?): {resp_body[:200]}")
+    check(status, 200, "admin login failed")
     if not isinstance(body, dict):
         raise AssertionError("login response is not JSON")
     cookie = hdr(headers, "Set-Cookie").split(";", 1)[0]
@@ -126,6 +136,49 @@ def session() -> tuple[str, str]:
     if not SESSION_COOKIE or not SESSION_CSRF:
         SESSION_COOKIE, SESSION_CSRF = login()
     return SESSION_COOKIE, SESSION_CSRF
+
+
+def customer_session() -> tuple[str, str]:
+    """Register (idempotent) and login a test customer. Returns (cookie_header, csrf_token)."""
+    global USER_SESSION_COOKIE, USER_SESSION_CSRF
+    if USER_SESSION_COOKIE and USER_SESSION_CSRF:
+        return USER_SESSION_COOKIE, USER_SESSION_CSRF
+
+    # Register — ignore if already exists
+    req("POST", "/auth/register", {
+        "username": TEST_USER_USERNAME,
+        "password": TEST_USER_PASSWORD,
+    })
+
+    # Login
+    status, body, headers = req("POST", "/auth/login", {
+        "username": TEST_USER_USERNAME,
+        "password": TEST_USER_PASSWORD,
+    })
+    if status != 200:
+        raise AssertionError(f"customer login failed with status {status}: {body}")
+    if not isinstance(body, dict):
+        raise AssertionError("customer login response is not JSON")
+
+    cookie = hdr(headers, "Set-Cookie").split(";", 1)[0]
+    csrf = str(body.get("csrf_token") or "")
+    if not cookie:
+        raise AssertionError("customer login did not return cookie")
+    USER_SESSION_COOKIE = cookie
+    USER_SESSION_CSRF = csrf
+    return USER_SESSION_COOKIE, USER_SESSION_CSRF
+
+
+def customer_auth_headers() -> dict[str, str]:
+    """Headers for /api/generate endpoints: internal token + user cookie + CSRF."""
+    if not API_AUTH_TOKEN:
+        raise AssertionError("API_AUTH_TOKEN is missing from environment or backend/.env")
+    u_cookie, u_csrf = customer_session()
+    return {
+        "X-API-Auth": API_AUTH_TOKEN,
+        "Cookie": u_cookie,
+        "X-CSRF-Token": u_csrf,
+    }
 
 
 print("=" * 60)
@@ -206,20 +259,18 @@ test("2.2 CORS blocks evil origin", t_cors_blocked)
 
 def t_generate_requires_internal_token():
     status, _, _ = req("POST", "/api/generate", {"image_url": "https://x.com/x.jpg"})
-    check(status, 403 if API_AUTH_TOKEN else 503)
+    # Empty API_AUTH_TOKEN → 503; configured but missing header → 403
+    expected = 503 if not API_AUTH_TOKEN else 403
+    check(status, expected)
 
 
 test("2.3 /api/generate rejects missing internal API auth", t_generate_requires_internal_token)
 
 
-def auth_headers() -> dict[str, str]:
-    if not API_AUTH_TOKEN:
-        raise AssertionError("API_AUTH_TOKEN is missing from environment or backend/.env")
-    return {"X-API-Auth": API_AUTH_TOKEN}
-
-
 def t_py_country():
-    status, _, _ = req("POST", "/api/generate", {"image_url": "https://x.com/x.jpg", "country": "INVALID"}, extra_headers=auth_headers())
+    status, _, _ = req("POST", "/api/generate",
+                       {"image_url": "https://x.com/x.jpg", "country": "INVALID"},
+                       extra_headers=customer_auth_headers())
     check(status, 422)
 
 
@@ -227,7 +278,9 @@ test("2.4 invalid country -> 422", t_py_country)
 
 
 def t_py_url_sync():
-    status, _, _ = req("POST", "/api/generate", {"image_url": "not-a-url"}, extra_headers=auth_headers())
+    status, _, _ = req("POST", "/api/generate",
+                       {"image_url": "not-a-url"},
+                       extra_headers=customer_auth_headers())
     check_in(status, [400, 422])
 
 
@@ -235,7 +288,9 @@ test("2.5 sync invalid image_url -> 4xx", t_py_url_sync)
 
 
 def t_py_url_async():
-    status, _, _ = req("POST", "/api/generate/async", {"image_url": "not-a-url"}, extra_headers=auth_headers())
+    status, _, _ = req("POST", "/api/generate/async",
+                       {"image_url": "not-a-url"},
+                       extra_headers=customer_auth_headers())
     check_in(status, [400, 422])
 
 
@@ -274,7 +329,10 @@ def t_logout_with_csrf():
     cookie, csrf = session()
     status, _, headers = req("POST", "/admin/logout", extra_headers={"Cookie": cookie, "X-CSRF-Token": csrf})
     check(status, 200)
-    check_in_text("max-age=0", hdr(headers, "Set-Cookie"))
+    set_cookie = hdr(headers, "Set-Cookie")
+    check_in_text("max-age=0", set_cookie)
+    if COOKIE_SECURE:
+        check_in_text("secure", set_cookie.lower())
     SESSION_COOKIE = ""
     SESSION_CSRF = ""
 

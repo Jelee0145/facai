@@ -50,6 +50,10 @@ def main() -> None:
         check("completed-task" not in pending, "completed task was restored as pending")
         check("error-task" not in pending, "error task was restored as pending")
 
+        if hasattr(database._local, "conn") and database._local.conn is not None:
+            database._local.conn.close()
+            database._local.conn = None
+
     print("task-store regression tests passed")
 
 

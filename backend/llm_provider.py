@@ -3,8 +3,11 @@ LLM 智能配置器 — 阿里云百炼 API 调用
 """
 
 import json
+import logging
+import re
 import httpx
 from database import get_config
+from llm_schema import LLMOutput
 from llm_prompts import (
     SYSTEM_PROMPT_VISION,
     SYSTEM_PROMPT_TEXT,
@@ -14,6 +17,10 @@ from llm_prompts import (
 
 DASHSCOPE_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 LLM_TIMEOUT = 30
+
+logger = logging.getLogger("ecommerce-gen.llm")
+
+_CODE_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
 
 
 def get_llm_config() -> tuple[str, str]:
@@ -63,6 +70,31 @@ def build_llm_messages(
     return messages
 
 
+def _parse_llm_json(content: str) -> dict | None:
+    """Parse LLM JSON response, stripping markdown code fences if present.
+    Returns schema-validated dict or None on any failure."""
+    if not content or not content.strip():
+        return None
+    raw = content.strip()
+    # Strip code fence wrapper if present
+    fence = _CODE_FENCE_RE.search(raw)
+    if fence:
+        raw = fence.group(1).strip()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    # Validate against LLMOutput schema — fail-closed, no raw-dict fallback
+    try:
+        validated = LLMOutput.model_validate(parsed)
+        return validated.model_dump()
+    except Exception as e:
+        logger.warning(f"[LLM] Schema validation failed: {e}")
+        return None
+
+
 async def analyze(
     image_url: str | None,
     product_type: str,
@@ -107,7 +139,7 @@ async def analyze(
 
         data = resp.json()
         content = data["choices"][0]["message"]["content"]
-        result = json.loads(content)
+        result = _parse_llm_json(content)
         return result
 
     except httpx.TimeoutException:

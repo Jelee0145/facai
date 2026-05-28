@@ -9,20 +9,44 @@ INJECTION_BLOCKLIST = [
     "override", "new instructions", "system prompt",
     "you are now", "act as", "pretend",
     "forget", "disregard", " disregard",
+    # Chinese injection patterns
+    "忽略之前的", "忽略以上", "忽略前面",
+    "你是一个", "你扮演", "假装你是",
+    "新的指令", "新指令", "系统提示",
+    "覆盖", "不要管", "不要理会",
+    "ignore instruction", "ignore above instruction",
+    "disregard all", "disregard previous",
+    "you must", "you shall", "do not follow",
+    "DAN", "jailbreak", "developer mode",
 ]
 
 
-def sanitize_prompt_input(value: str) -> str:
-    """消毒用户输入，防止 prompt 注入"""
+class PromptValidationError(Exception):
+    """Raised when prompt input fails security validation."""
+    def __init__(self, field: str, message: str):
+        self.field = field
+        self.message = message
+        super().__init__(f"{field}: {message}")
+
+
+def sanitize_prompt_input(value: str, field_name: str = "input") -> str:
+    """消毒用户输入，防止 prompt 注入。拒绝（而非截断）恶意输入。
+    Raises PromptValidationError if injection is detected."""
     if not isinstance(value, str):
         return ""
     s = value.strip()[:200]
-    s = s.replace("\n", " ").replace("\r", " ")
+    # Reject control characters (except newline/tab which we normalize)
+    for ch in s:
+        if ord(ch) < 32 and ch not in ("\n", "\t", "\r"):
+            raise PromptValidationError(field_name, "输入包含不允许的控制字符")
+    s = s.replace("\n", " ").replace("\r", " ").replace("\t", " ")
     lower = s.lower()
     for keyword in INJECTION_BLOCKLIST:
         if keyword in lower:
-            s = s[:lower.index(keyword)].strip()
-            break
+            raise PromptValidationError(
+                field_name,
+                f"输入包含不允许的关键词，请修改后重试"
+            )
     return s[:200].strip()
 
 

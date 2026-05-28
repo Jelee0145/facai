@@ -3,9 +3,17 @@ import { fetchWithRetry } from "@/lib/fetch";
 import { withCircuitBreaker, CircuitOpenError } from "@/lib/circuit-breaker";
 import { logger } from "@/lib/logger";
 
-const BACKEND_URL = (process.env.BACKEND_URL || "http://localhost:8001").trim();
+const BACKEND_URL = (process.env.BACKEND_URL || "http://localhost:8001")
+  .trim()
+  .replace(/\s+/g, "")
+  .replace(/\/+$/, "");
 const API_AUTH_TOKEN = process.env.API_AUTH_TOKEN || "";
 const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10MB
+
+function buildBackendUrl(path: string, search = "") {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return `${BACKEND_URL}${normalizedPath}${search}`;
+}
 
 export interface ProxyOptions {
   /** 路由路径前缀 (如 /api/generate、/admin)，会替换掉原始路径 */
@@ -24,6 +32,11 @@ export interface ProxyOptions {
    */
   customPath?: string;
 }
+
+/** Headers that should never be forwarded to the backend */
+const HOP_BY_HOP_HEADERS = new Set([
+  "host", "content-length", "transfer-encoding", "expect",
+]);
 
 /**
  * 通用后端代理函数
@@ -54,34 +67,27 @@ export async function proxyToBackend(
   try {
     let targetUrl: string;
     if (customPath) {
-      targetUrl = `${BACKEND_URL}${customPath}`;
+      targetUrl = buildBackendUrl(customPath);
     } else {
       const url = new URL(request.url);
       const subPath = params ? params.path.join("/") : "";
       const path = targetPrefix
         ? `${targetPrefix}${subPath ? `/${subPath}` : ""}`
         : url.pathname;
-      targetUrl = `${BACKEND_URL}${path}${url.search}`;
+      targetUrl = buildBackendUrl(path, url.search);
     }
 
+    // Build request headers, filtering based on forwardCookies
     const headers: Record<string, string> = {};
+    const stripHeaders = forwardCookies
+      ? HOP_BY_HOP_HEADERS
+      : new Set([...HOP_BY_HOP_HEADERS, "cookie", "authorization"]);
 
-    if (forwardCookies) {
-      // forward all original headers (like else branch)
-      request.headers.forEach((value, key) => {
-        const k = key.toLowerCase();
-        if (k !== "host" && k !== "content-length" && k !== "transfer-encoding" && k !== "expect") {
-          headers[key] = value;
-        }
-      });
-    } else {
-      request.headers.forEach((value, key) => {
-        const k = key.toLowerCase();
-        if (k !== "host" && k !== "content-length" && k !== "transfer-encoding" && k !== "expect") {
-          headers[key] = value;
-        }
-      });
-    }
+    request.headers.forEach((value, key) => {
+      if (!stripHeaders.has(key.toLowerCase())) {
+        headers[key] = value;
+      }
+    });
 
     if (API_AUTH_TOKEN) {
       headers["X-API-Auth"] = API_AUTH_TOKEN;
@@ -97,11 +103,14 @@ export async function proxyToBackend(
       fetchOptions.body = body;
     }
 
-    // SSE streaming
+    // SSE streaming: detect by Accept header or URL suffix
     if (handleStreaming) {
+      const accept = request.headers.get("accept") || "";
       const url = new URL(request.url);
-      if (url.pathname.endsWith("/stream")) {
-        const streamRes = await fetch(targetUrl, fetchOptions);
+      if (accept.includes("text/event-stream") || url.pathname.endsWith("/stream")) {
+        const streamRes = await withCircuitBreaker("backend", () =>
+          fetch(targetUrl, fetchOptions),
+        );
         return new Response(streamRes.body, {
           status: streamRes.status,
           headers: {
@@ -144,7 +153,13 @@ export async function proxyToBackend(
     }
   } catch (error) {
     if (error instanceof CircuitOpenError) {
-      return NextResponse.json({ error: "Service temporarily unavailable" }, { status: 503 });
+      return NextResponse.json(
+        { error: "Service temporarily unavailable" },
+        {
+          status: 503,
+          headers: { "Retry-After": "30" },
+        },
+      );
     }
     logger.error("Proxy error:", error);
     return NextResponse.json({ error: "Backend service unavailable" }, { status: 502 });
