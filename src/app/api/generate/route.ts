@@ -2,9 +2,13 @@ import { NextRequest } from "next/server";
 import { proxyToBackend } from "@/lib/proxy";
 
 export async function POST(request: NextRequest) {
-  return proxyToBackend(request, "POST", undefined);
+  return proxyToBackend(request, "POST", undefined, {
+    forwardCookies: true,
+  });
 }
 
 export async function GET(request: NextRequest) {
-  return proxyToBackend(request, "GET", undefined);
+  return proxyToBackend(request, "GET", undefined, {
+    forwardCookies: true,
+  });
 }

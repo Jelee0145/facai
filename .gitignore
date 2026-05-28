@@ -61,6 +61,7 @@ node-compile-cache/
 
 # AI Agent work logs
 .workbuddy/
+.playwright-mcp/
 
 # Editor directories and files
 .vscode/*
@@ -109,9 +110,9 @@ backend/data.db
 # Python
 __pycache__/
 *.pyc
+backend/.venv/
 
 # Misc
 .vercel
 .turbo
-
 

@@ -13,6 +13,51 @@ import { Modal } from "@/components/ui/modal";
 
 const proxyImg = (url: string) => `/api/proxy-image?url=${encodeURIComponent(url)}`;
 
+interface UserProfile {
+  id: number;
+  username: string;
+  phone?: string;
+  email?: string;
+}
+
+interface Wallet {
+  balance: number;
+  total_recharged?: number;
+  total_spent?: number;
+}
+
+interface CreditPackage {
+  id: number;
+  name: string;
+  price_fen: number;
+  points: number;
+  bonus_points: number;
+}
+
+interface UserHistoryItem {
+  id: number;
+  created_at: string;
+  product_type: string;
+  description_snapshot: string;
+  preview_images: string[];
+  charge_points: number;
+  status: string;
+}
+
+interface LedgerItem {
+  id: number;
+  type: string;
+  direction: string;
+  points: number;
+  balance_after: number;
+  order_no?: string;
+  amount_fen?: number;
+  order_status?: string;
+  package_name?: string;
+  remark?: string;
+  created_at: string;
+}
+
 // AI模型列表
 const MODELS = [
   { 
@@ -138,6 +183,7 @@ export default function HomePage() {
 
   // 上传图片相关
   const [uploadedImage, setUploadedImage] = useState<string | null>(null);
+  const [isDraggingUpload, setIsDraggingUpload] = useState<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // 自定义类型相关
@@ -182,6 +228,20 @@ export default function HomePage() {
   const [generationStatus, setGenerationStatus] = useState<string>("idle");
   const [latestImage, setLatestImage] = useState<string | null>(null);
   const [currentTaskId, setCurrentTaskId] = useState<string | null>(null);
+  const [user, setUser] = useState<UserProfile | null>(null);
+  const [wallet, setWallet] = useState<Wallet | null>(null);
+  const [csrfToken, setCsrfToken] = useState("");
+  const [generationCostPoints, setGenerationCostPoints] = useState(10);
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authForm, setAuthForm] = useState({ username: "", password: "", phone: "", email: "" });
+  const [authLoading, setAuthLoading] = useState(false);
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [historyItems, setHistoryItems] = useState<UserHistoryItem[]>([]);
+  const [showBillingModal, setShowBillingModal] = useState(false);
+  const [packages, setPackages] = useState<CreditPackage[]>([]);
+  const [ledgerItems, setLedgerItems] = useState<LedgerItem[]>([]);
+  const [billingLoading, setBillingLoading] = useState(false);
 
   useEffect(() => {
     fetch("/api/custom-types")
@@ -198,6 +258,26 @@ export default function HomePage() {
         }
       })
       .catch((e) => logger.error("Failed to load custom types:", e));
+  }, []);
+
+  useEffect(() => {
+    fetch("/api/auth/me")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!data) return;
+        setUser(data.user);
+        setWallet(data.wallet);
+        setCsrfToken(data.csrf_token || "");
+        if (typeof data.generation_cost_points === "number") {
+          setGenerationCostPoints(data.generation_cost_points);
+        }
+      })
+      .catch((e) => logger.error("Failed to load user session:", e));
+
+    fetch("/api/user/packages")
+      .then((r) => (r.ok ? r.json() : { packages: [] }))
+      .then((data) => setPackages(data.packages || []))
+      .catch((e) => logger.error("Failed to load credit packages:", e));
   }, []);
 
   useSSE(currentTaskId, {
@@ -234,6 +314,7 @@ export default function HomePage() {
       setProgressPercent(100);
       setIsLoading(false);
       setCurrentTaskId(null);
+      refreshWallet().catch((e) => logger.error("Failed to refresh wallet:", e));
     },
     onError: (error: string) => {
       setGenerationStatus("error");
@@ -249,9 +330,113 @@ export default function HomePage() {
 
   const currentCountry = COUNTRIES.find((c) => c.code === selectedCountry);
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+  const refreshWallet = async () => {
+    const res = await fetch("/api/user/wallet");
+    if (!res.ok) return;
+    const data = await res.json();
+    setWallet(data.wallet);
+    if (typeof data.generation_cost_points === "number") {
+      setGenerationCostPoints(data.generation_cost_points);
+    }
+  };
+
+  const handleAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthLoading(true);
+    try {
+      const endpoint = authMode === "login" ? "/api/auth/login" : "/api/auth/register";
+      const body = authMode === "login"
+        ? { username: authForm.username, password: authForm.password }
+        : authForm;
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast.error(String(data.detail || "登录失败"));
+        return;
+      }
+      setUser(data.user);
+      setWallet(data.wallet);
+      setCsrfToken(data.csrf_token || "");
+      setShowAuthModal(false);
+      setAuthForm({ username: "", password: "", phone: "", email: "" });
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    await fetch("/api/auth/logout", {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken },
+    });
+    setUser(null);
+    setWallet(null);
+    setCsrfToken("");
+  };
+
+  const loadHistory = async () => {
+    if (!user) {
+      setShowAuthModal(true);
+      return;
+    }
+    const res = await fetch("/api/user/history");
+    if (!res.ok) return;
+    const data = await res.json();
+    setHistoryItems(data.items || []);
+    setShowHistoryModal(true);
+  };
+
+  const loadBilling = async () => {
+    if (!user) {
+      setShowAuthModal(true);
+      return;
+    }
+    setBillingLoading(true);
+    try {
+      const [ledgerRes, packagesRes] = await Promise.all([
+        fetch("/api/user/ledger"),
+        fetch("/api/user/packages"),
+      ]);
+      if (ledgerRes.ok) {
+        const ledgerData = await ledgerRes.json();
+        setLedgerItems(ledgerData.items || []);
+      }
+      if (packagesRes.ok) {
+        const packagesData = await packagesRes.json();
+        setPackages(packagesData.packages || []);
+      }
+      setShowBillingModal(true);
+    } finally {
+      setBillingLoading(false);
+    }
+  };
+
+  const createRechargeOrder = async (packageId: number) => {
+    if (!csrfToken) return;
+    const res = await fetch("/api/user/orders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+      body: JSON.stringify({ package_id: packageId }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast.error(String(data.detail || "创建订单失败"));
+      return;
+    }
+    toast.success(`订单 ${data.order?.order_no || ""} 已创建，等待支付接入`);
+    await loadBilling();
+  };
+
+  const readImageFile = (file: File | null) => {
     if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      toast.warning("请选择图片文件");
+      return;
+    }
 
     // 预览图片
     const reader = new FileReader();
@@ -259,6 +444,23 @@ export default function HomePage() {
       setUploadedImage(event.target?.result as string);
     };
     reader.readAsDataURL(file);
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    readImageFile(e.target.files?.[0] || null);
+  };
+
+  const handleUploadDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDraggingUpload(false);
+    readImageFile(e.dataTransfer.files?.[0] || null);
+  };
+
+  const handleUploadPaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
+    const file = Array.from(e.clipboardData.files).find((item) => item.type.startsWith("image/"));
+    if (!file) return;
+    e.preventDefault();
+    readImageFile(file);
   };
 
   const handleRemoveImage = () => {
@@ -269,6 +471,17 @@ export default function HomePage() {
   };
 
   const handleGenerate = async () => {
+    if (!user) {
+      setAuthMode("login");
+      setShowAuthModal(true);
+      toast.warning("请先登录");
+      return;
+    }
+    if ((wallet?.balance || 0) < generationCostPoints) {
+      loadBilling().catch((e) => logger.error("Failed to load billing:", e));
+      toast.warning("积分不足，请先充值");
+      return;
+    }
     if (!uploadedImage) {
       toast.warning("请先上传商品图片");
       return;
@@ -296,7 +509,7 @@ export default function HomePage() {
       // 1. 提交异步任务
       const startRes = await fetchWithRetry("/api/generate/async", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
         body: JSON.stringify({
           image_url: uploadedImage,
           product_type: getEffectiveProductType(),
@@ -306,7 +519,8 @@ export default function HomePage() {
       });
 
       if (!startRes.ok) {
-        throw new Error("启动生成失败");
+        const data = await startRes.json().catch(() => ({}));
+        throw new Error(String(data.detail || data.error || "启动生成失败"));
       }
 
       const { task_id } = await startRes.json();
@@ -314,13 +528,24 @@ export default function HomePage() {
       setCurrentTaskId(task_id);
     } catch (error) {
       logger.error("生成失败:", error);
-      toast.error("生成失败，请重试");
+      toast.error(error instanceof Error ? error.message : "生成失败，请重试");
       setGenerationStatus("error");
       setIsLoading(false);
     }
   };
 
   const handleQuickTest = async () => {
+    if (!user) {
+      setAuthMode("login");
+      setShowAuthModal(true);
+      toast.warning("请先登录");
+      return;
+    }
+    if ((wallet?.balance || 0) < generationCostPoints) {
+      loadBilling().catch((e) => logger.error("Failed to load billing:", e));
+      toast.warning("积分不足，请先充值");
+      return;
+    }
     if (!uploadedImage) {
       toast.warning("请先上传商品图片");
       return;
@@ -335,7 +560,7 @@ export default function HomePage() {
     try {
       const res = await fetchWithRetry("/api/generate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
         body: JSON.stringify({
           image_url: uploadedImage,
           product_type: getEffectiveProductType(),
@@ -351,19 +576,33 @@ export default function HomePage() {
         setTestStyleName(data.data.modelStyles?.[0] || "测试风格");
         if (data.data.titles) setTestTitles(data.data.titles);
         if (data.data.tags) setTestTags(data.data.tags);
+        refreshWallet().catch((e) => logger.error("Failed to refresh wallet:", e));
       } else {
-        alert("测试生成失败: " + (data.error || "未知错误"));
+        toast.error("测试生成失败: " + (data.detail || data.error || "未知错误"));
+        refreshWallet().catch((e) => logger.error("Failed to refresh wallet:", e));
       }
     } catch (error) {
       logger.error("测试失败:", error);
-      alert("测试生成失败，请重试");
+      toast.error("测试生成失败，请重试");
     } finally {
       setIsTesting(false);
     }
   };
 
   const handleSingleImageTest = async (styleIndex: number) => {
+    if (!user) {
+      setAuthMode("login");
+      setShowAuthModal(true);
+      toast.warning("请先登录");
+      return;
+    }
     if (!uploadedImage) return;
+
+    if ((wallet?.balance || 0) < generationCostPoints) {
+      loadBilling().catch((e) => logger.error("Failed to load billing:", e));
+      toast.warning("积分不足，请先充值");
+      return;
+    }
 
     setGeneratedImages((prev) => {
       const next = [...prev];
@@ -375,7 +614,7 @@ export default function HomePage() {
     try {
       const res = await fetchWithRetry("/api/generate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
         body: JSON.stringify({
           image_url: uploadedImage,
           product_type: getEffectiveProductType(),
@@ -393,12 +632,14 @@ export default function HomePage() {
           next[styleIndex] = data.data.modelImages[0];
           return next;
         });
+        refreshWallet().catch((e) => logger.error("Failed to refresh wallet:", e));
       } else {
-        alert(`单图生成失败: ${data.error || "未知错误"}`);
+        toast.error(`单图生成失败: ${data.detail || data.error || "未知错误"}`);
+        refreshWallet().catch((e) => logger.error("Failed to refresh wallet:", e));
       }
     } catch (error) {
       logger.error("单图生成失败:", error);
-      alert("单图生成失败，请重试");
+      toast.error("单图生成失败，请重试");
     } finally {
       setIsLoading(false);
     }
@@ -553,6 +794,30 @@ export default function HomePage() {
               </div>
             </div>
             <div className="flex items-center gap-4">
+              {user ? (
+                <div className="flex items-center gap-2 text-sm">
+                  <span className="text-white/80">{user.username}</span>
+                  <button onClick={loadBilling} className="px-3 py-2 bg-white/10 hover:bg-white/15 border border-white/15 text-white rounded-lg transition-colors">
+                    {wallet?.balance ?? 0} 积分
+                  </button>
+                  <button onClick={loadHistory} className="px-3 py-2 bg-white/10 hover:bg-white/15 border border-white/15 text-white rounded-lg transition-colors">
+                    历史记录
+                  </button>
+                  <button onClick={handleLogout} className="px-3 py-2 text-white/70 hover:text-white transition-colors">
+                    退出
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => {
+                    setAuthMode("login");
+                    setShowAuthModal(true);
+                  }}
+                  className="px-3 py-2 bg-white/10 hover:bg-white/15 border border-white/15 text-white rounded-lg transition-colors"
+                >
+                  登录 / 注册
+                </button>
+              )}
               <span className="text-sm text-purple-300">九国市场</span>
               <a
                 href={currentCountry?.shopUrl || "https://seller.tiktok.com/"}
@@ -681,7 +946,7 @@ export default function HomePage() {
         {/* 上传参考图 */}
         <section className="mb-8">
           <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
-            <span>🖼️</span> 上传参考图（可选）
+            <span>🖼️</span> 上传参考图
           </h2>
           <div className="border-2 border-dashed border-white/20 rounded-xl p-6 text-center bg-white/5">
             {uploadedImage ? (
@@ -702,24 +967,35 @@ export default function HomePage() {
                 <p className="text-white/60 text-sm mt-2">已上传参考图，将用于图生图</p>
               </div>
             ) : (
-              <>
+              <div
+                tabIndex={0}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setIsDraggingUpload(true);
+                }}
+                onDragLeave={() => setIsDraggingUpload(false)}
+                onDrop={handleUploadDrop}
+                onPaste={handleUploadPaste}
+                className={`relative min-h-40 cursor-pointer rounded-xl border border-white/15 px-4 py-5 text-center transition-colors ${
+                  isDraggingUpload ? "border-cyan-300 bg-cyan-400/10" : "bg-white/5"
+                }`}
+              >
                 <input
                   ref={fileInputRef}
                   type="file"
                   accept="image/*"
                   onChange={handleFileUpload}
-                  className="hidden"
+                  aria-label="上传参考图"
+                  className="absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0"
                   id="file-upload"
                 />
-                <label
-                  htmlFor="file-upload"
-                  className="cursor-pointer flex flex-col items-center"
-                >
+                <div className="pointer-events-none flex flex-col items-center">
                   <div className="text-4xl mb-2">📤</div>
                   <p className="text-white/80">点击上传图片</p>
                   <p className="text-white/50 text-sm mt-1">支持 JPG、PNG 格式</p>
-                </label>
-              </>
+                  <p className="mt-3 text-xs text-white/45">支持拖拽或粘贴图片</p>
+                </div>
+              </div>
             )}
           </div>
         </section>
@@ -1147,6 +1423,161 @@ export default function HomePage() {
       </Modal>
 
       {/* 成功提示 */}
+      <Modal
+        open={showAuthModal}
+        title={authMode === "login" ? "用户登录" : "用户注册"}
+        onClose={() => setShowAuthModal(false)}
+        containerClassName="w-full max-w-md"
+      >
+        <form onSubmit={handleAuthSubmit} className="space-y-4">
+          <input
+            type="text"
+            placeholder="用户名"
+            value={authForm.username}
+            onChange={(e) => setAuthForm({ ...authForm, username: e.target.value })}
+            className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-white/50 focus:outline-none focus:border-purple-500"
+            required
+            minLength={3}
+            maxLength={50}
+          />
+          <input
+            type="password"
+            placeholder="密码"
+            value={authForm.password}
+            onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })}
+            className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-white/50 focus:outline-none focus:border-purple-500"
+            required
+            minLength={6}
+            maxLength={100}
+          />
+          {authMode === "register" && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <input
+                type="text"
+                placeholder="手机号（可选）"
+                value={authForm.phone}
+                onChange={(e) => setAuthForm({ ...authForm, phone: e.target.value })}
+                className="px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-white/50 focus:outline-none focus:border-purple-500"
+                maxLength={30}
+              />
+              <input
+                type="email"
+                placeholder="邮箱（可选）"
+                value={authForm.email}
+                onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })}
+                className="px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-white/50 focus:outline-none focus:border-purple-500"
+                maxLength={120}
+              />
+            </div>
+          )}
+          <button
+            type="submit"
+            disabled={authLoading}
+            className="w-full py-3 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 rounded-lg font-semibold text-white transition-colors"
+          >
+            {authLoading ? "处理中..." : authMode === "login" ? "登录" : "注册并登录"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setAuthMode(authMode === "login" ? "register" : "login")}
+            className="w-full py-2 text-white/70 hover:text-white text-sm"
+          >
+            {authMode === "login" ? "没有账号？去注册" : "已有账号？去登录"}
+          </button>
+        </form>
+      </Modal>
+
+      <Modal
+        open={showHistoryModal}
+        title="我的生成历史"
+        onClose={() => setShowHistoryModal(false)}
+        containerClassName="w-full max-w-5xl"
+      >
+        <div className="space-y-3">
+          {historyItems.map((item) => (
+            <div key={item.id} className="grid grid-cols-1 md:grid-cols-[1.1fr_1fr_1.6fr_1.4fr] gap-4 items-center bg-white/5 border border-white/10 rounded-lg p-4">
+              <div className="text-white/80 text-sm">{item.created_at?.replace("T", " ").slice(0, 19)}</div>
+              <div className="text-white font-medium">{item.product_type || "-"}</div>
+              <div className="text-white/70 text-sm line-clamp-2">{item.description_snapshot || ""}</div>
+              <div className="flex gap-2">
+                {item.preview_images.slice(0, 3).map((url, index) => (
+                  <img
+                    key={`${item.id}-${index}`}
+                    src={proxyImg(url)}
+                    alt="历史缩略图"
+                    className="h-16 w-16 rounded-lg object-cover border border-white/10"
+                    loading="lazy"
+                    decoding="async"
+                  />
+                ))}
+              </div>
+            </div>
+          ))}
+          {historyItems.length === 0 && (
+            <div className="py-10 text-center text-white/50">暂无生成历史</div>
+          )}
+        </div>
+      </Modal>
+
+      <Modal
+        open={showBillingModal}
+        title="积分充值与消费明细"
+        onClose={() => setShowBillingModal(false)}
+        containerClassName="w-full max-w-5xl"
+      >
+        <div className="space-y-6">
+          <div className="flex items-center justify-between bg-white/5 border border-white/10 rounded-lg p-4">
+            <div>
+              <div className="text-white/60 text-sm">当前余额</div>
+              <div className="text-2xl font-bold text-white">{wallet?.balance ?? 0} 积分</div>
+            </div>
+            <div className="text-white/60 text-sm">每次生成扣 {generationCostPoints} 积分</div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {packages.map((pkg) => (
+              <div key={pkg.id} className="bg-white/5 border border-white/10 rounded-lg p-4">
+                <div className="text-white font-semibold">{pkg.name}</div>
+                <div className="text-white/60 text-sm mt-1">¥{(pkg.price_fen / 100).toFixed(2)}</div>
+                <div className="text-2xl font-bold text-white mt-3">{pkg.points + pkg.bonus_points} 积分</div>
+                <button
+                  onClick={() => createRechargeOrder(pkg.id)}
+                  className="w-full mt-4 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg text-white text-sm font-medium"
+                >
+                  创建充值订单
+                </button>
+              </div>
+            ))}
+          </div>
+          <div className="bg-white/5 border border-white/10 rounded-lg overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-white/5 text-white/60">
+                <tr>
+                  <th className="text-left px-4 py-3">时间</th>
+                  <th className="text-left px-4 py-3">类型</th>
+                  <th className="text-left px-4 py-3">订单</th>
+                  <th className="text-left px-4 py-3">积分</th>
+                  <th className="text-left px-4 py-3">余额</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ledgerItems.map((item) => (
+                  <tr key={item.id} className="border-t border-white/10 text-white/80">
+                    <td className="px-4 py-3">{item.created_at?.replace("T", " ").slice(0, 19)}</td>
+                    <td className="px-4 py-3">{item.type}</td>
+                    <td className="px-4 py-3">{item.order_no || item.remark || "-"}</td>
+                    <td className="px-4 py-3">{item.direction === "out" ? "-" : "+"}{item.points}</td>
+                    <td className="px-4 py-3">{item.balance_after}</td>
+                  </tr>
+                ))}
+                {!billingLoading && ledgerItems.length === 0 && (
+                  <tr><td colSpan={5} className="px-4 py-8 text-center text-white/50">暂无消费明细</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </Modal>
+
       {showSuccess && (
         <div className="fixed top-20 left-1/2 -translate-x-1/2 px-6 py-3 bg-green-500 text-white rounded-lg shadow-lg animate-bounce">
           复制成功

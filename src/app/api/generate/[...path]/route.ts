@@ -8,6 +8,7 @@ export async function POST(
   return proxyToBackend(request, "POST", await params, {
     targetPrefix: "/api/generate",
     handleStreaming: true,
+    forwardCookies: true,
   });
 }
 
@@ -18,5 +19,6 @@ export async function GET(
   return proxyToBackend(request, "GET", await params, {
     targetPrefix: "/api/generate",
     handleStreaming: true,
+    forwardCookies: true,
   });
 }
