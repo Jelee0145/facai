@@ -9,6 +9,7 @@ import { useEffect } from "react";
 const menu = [
   { label: "仪表盘", path: "/admin" },
   { label: "API Keys", path: "/admin/keys" },
+  { label: "计费管理", path: "/admin/billing" },
   { label: "LLM 设置", path: "/admin/llm" },
   { label: "历史记录", path: "/admin/history" },
 ];

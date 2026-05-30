@@ -78,7 +78,7 @@ export function Toaster() {
   }, [addToast]);
 
   return (
-    <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[100] flex flex-col gap-2 items-center pointer-events-none">
+    <div className="fixed bottom-[33vh] left-1/2 -translate-x-1/2 z-[100] flex flex-col gap-2 items-center pointer-events-none">
       {toasts.map((t) => (
         <div key={t.id} className="pointer-events-auto">
           <ToastItem toast={t} onRemove={removeToast} />

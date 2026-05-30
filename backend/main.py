@@ -5,10 +5,12 @@ FastAPI 图片生成后端
 """
 
 import asyncio
+import base64
 import json
 import re
 import time
 import os
+import sys
 import uuid
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Request, Depends
@@ -29,11 +31,25 @@ from prompts_v2 import (
     generate_all_tasks,
     build_comparison_prompt,
     build_detail_prompt,
+    PromptValidationError,
     COUNTRY_CONFIG,
     MODEL_STYLE_NAMES,
 )
 from key_manager import key_manager
-from security import authenticate, login, sanitize_input, refresh_token, TOKEN_EXPIRE_DAYS, JWT_EXPIRE_MINUTES
+from security import (
+    authenticate,
+    authenticate_customer,
+    create_customer_token,
+    hash_password,
+    is_valid_password_hash,
+    login,
+    login_customer,
+    sanitize_input,
+    refresh_token,
+    validate_password_strength,
+    TOKEN_EXPIRE_DAYS,
+    JWT_EXPIRE_MINUTES,
+)
 from middleware import init_rate_limiting
 from csrf import verify_csrf
 from sse import sse_stream, push_event
@@ -46,6 +62,11 @@ from database import (
     save_task_progress, load_pending_tasks, delete_old_tasks, init_db,
     get_config, set_config, get_all_configs,
     get_all_custom_types, add_custom_type, delete_custom_type,
+    charge_generation, create_customer, create_order, get_active_keys, get_generation_cost_points,
+    get_wallet, list_all_orders, list_credit_packages, list_user_history,
+    list_user_ledger, list_user_orders, mark_order_paid,
+    upsert_credit_package, get_user, create_user, ensure_refund_once,
+    mask_api_key, update_admin_password,
 )
 from llm_provider import analyze as llm_analyze, build_llm_messages
 
@@ -71,6 +92,22 @@ ALLOWED_IMAGE_MIMES = {"image/jpeg", "image/png", "image/webp", "image/avif"}
 DATA_URL_PATTERN = re.compile(r"^data:(image/\w+);base64,(.+)$")
 
 
+def ensure_api_key_available():
+    if not get_active_keys():
+        raise HTTPException(status_code=409, detail="没有可用的 API Key（可能因连续鉴权失败被自动禁用），请到后台检查 Key 状态或添加新 Key")
+
+
+def _try_refund_generation(task_data: dict, user_id: int, task_id: str, points: int, reason: str) -> dict:
+    """Attempt a refund; swallow exceptions so task can still reach terminal state."""
+    try:
+        return ensure_refund_once(task_data, user_id, task_id, points, reason)
+    except Exception as err:
+        logger.exception(f"[REFUND] Refund failed for task {task_id}: {err}")
+        task_data["refund_status"] = "failed"
+        task_data["refund_error"] = str(err)[:500]
+        return {"status": "failed", "refunded": False, "points": points, "error": str(err)[:500]}
+
+
 def validate_image_data(image_url: str):
     """验证图片数据 URL 的格式、MIME 类型和大小"""
     if image_url.startswith("http://") or image_url.startswith("https://"):
@@ -85,16 +122,73 @@ def validate_image_data(image_url: str):
     raw_size = len(base64_data) * 3 // 4
     if raw_size > MAX_IMAGE_SIZE:
         raise HTTPException(status_code=413, detail=f"图片过大 ({raw_size / 1024 / 1024:.1f}MB)，最大允许 {MAX_IMAGE_SIZE / 1024 / 1024:.0f}MB")
+    # Validate magic bytes match declared MIME
+    try:
+        raw_bytes = base64.b64decode(base64_data, validate=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="图片 base64 数据无效")
+    if len(raw_bytes) < 4:
+        raise HTTPException(status_code=400, detail="图片数据过小，无法识别格式")
+    # Check magic bytes
+    header = raw_bytes[:8]
+    valid_magic = False
+    if header[:3] == b"\xff\xd8\xff":  # JPEG
+        valid_magic = mime == "image/jpeg"
+    elif header[:4] == b"\x89PNG":  # PNG
+        valid_magic = mime == "image/png"
+    elif header[:4] == b"RIFF" and raw_bytes[8:12] == b"WEBP":  # WebP
+        valid_magic = mime == "image/webp"
+    elif header[:4] in (b"\x00\x00\x00\x1c", b"\x00\x00\x00\x20") or raw_bytes[4:8] == b"ftyp":  # AVIF/HEIF
+        valid_magic = mime == "image/avif"
+    if not valid_magic:
+        raise HTTPException(status_code=400, detail="图片格式与声明的 MIME 类型不一致")
 
 
 async def verify_api_auth(request: Request):
     """验证 API 内部认证令牌（保护生成端点不被外部直接调用）"""
     if not API_AUTH_TOKEN:
-        return True
+        raise HTTPException(status_code=503, detail="API auth is not configured")
     auth_header = request.headers.get("X-API-Auth", "")
-    if auth_header != API_AUTH_TOKEN:
+    import hmac
+    if not auth_header or not hmac.compare_digest(auth_header, API_AUTH_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
     return True
+
+
+def _set_user_cookie(resp: JSONResponse, token: str, max_age: int = TOKEN_EXPIRE_DAYS * 24 * 3600):
+    resp.set_cookie(
+        key="user_access_token",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        path="/",
+        max_age=max_age,
+        secure=COOKIE_SECURE,
+    )
+
+
+def _clear_user_cookie(resp: JSONResponse):
+    resp.set_cookie(
+        key="user_access_token",
+        value="",
+        httponly=True,
+        samesite="lax",
+        path="/",
+        max_age=0,
+        secure=COOKIE_SECURE,
+    )
+
+
+def _verify_user_csrf(request: Request, user: dict):
+    if request.method.upper() in {"POST", "PUT", "DELETE"}:
+        token = request.headers.get("X-CSRF-Token", "")
+        if not token or token != user.get("csrf_token", ""):
+            raise HTTPException(status_code=403, detail="CSRF token mismatch")
+
+
+def _preview_images(urls: list[str]) -> str:
+    visible = [u for u in urls if isinstance(u, str) and u and not u.startswith("data:")]
+    return json.dumps(visible[:3], ensure_ascii=False)
 
 
 @app.exception_handler(Exception)
@@ -102,6 +196,11 @@ async def global_exception_handler(request: Request, exc: Exception):
     """全局异常：过滤敏感路径信息"""
     if isinstance(exc, HTTPException):
         raise exc
+    if isinstance(exc, PromptValidationError):
+        return JSONResponse(
+            status_code=400,
+            content={"detail": f"输入校验失败：{exc.message}", "field": exc.field},
+        )
     msg = str(exc)
     msg = msg.replace(str(os.getcwd()).replace("\\", "/"), "[PROJECT_ROOT]")
     msg = msg.replace(str(os.getcwd()), "[PROJECT_ROOT]")
@@ -123,27 +222,37 @@ async def startup():
         print("[SECURITY] CRITICAL: NODE_ENV=production but API_AUTH_TOKEN is not set!")
         print("[SECURITY] Set API_AUTH_TOKEN in backend/.env and .env (frontend)")
         sys.exit(1)
-    # 自动 seed 管理员
-    try:
-        from database import get_user, create_user
-        from security import hash_password
-        import secrets
-        admin_pw = os.getenv("ADMIN_PASSWORD") or secrets.token_urlsafe(12)
-        if not get_user("admin"):
-            create_user("admin", hash_password(admin_pw))
-            print("[INIT] Admin account created (password saved to backend/.env)")
-            # write password to .env if not already set
-            env_path = os.path.join(os.path.dirname(__file__) or ".", ".env")
-            if not os.getenv("ADMIN_PASSWORD"):
-                try:
-                    with open(env_path, "a" if os.path.exists(env_path) else "w", encoding="utf-8") as f:
-                        f.write(f"\nADMIN_PASSWORD={admin_pw}\n")
-                except Exception:
-                    print(f"  [WARN] Could not write ADMIN_PASSWORD to {env_path}")
+    # Admin bootstrap
+    WEAK_PASSWORDS = {"admin123", "password", "123456", "admin", "admin888", "test123"}
+    _admin_pw = os.getenv("ADMIN_PASSWORD", "")
+    _is_production = os.getenv("NODE_ENV", "").lower() in ("production", "prod")
+    _admin_user = get_user("admin")
+    if not _admin_user:
+        # Admin does not exist — create if possible
+        if not _admin_pw or (_is_production and _admin_pw.lower() in WEAK_PASSWORDS):
+            if _is_production:
+                print("[SECURITY] CRITICAL: Production requires a strong ADMIN_PASSWORD and admin account does not exist!")
+                sys.exit(1)
+            else:
+                print("[SECURITY] WARNING: ADMIN_PASSWORD is not set. Admin account not created. Set ADMIN_PASSWORD and restart.")
         else:
-            print("[INIT] Admin account exists")
-    except Exception as e:
-        print(f"[INIT] 管理员创建失败: {e}")
+            create_user("admin", hash_password(_admin_pw))
+            print("[INIT] Admin account created from ADMIN_PASSWORD")
+    else:
+        # Admin exists — check if hash is valid
+        if not is_valid_password_hash(_admin_user.get("password_hash", "")):
+            # Bad hash: try to repair with ADMIN_PASSWORD
+            _can_repair = _admin_pw and (not _is_production or _admin_pw.lower() not in WEAK_PASSWORDS)
+            if _can_repair:
+                update_admin_password("admin", hash_password(_admin_pw))
+                print("[INIT] Admin password_hash was invalid — repaired from ADMIN_PASSWORD")
+            else:
+                msg = "[SECURITY] CRITICAL: Admin password_hash is invalid (not bcrypt). Login will fail. Set a strong ADMIN_PASSWORD and restart."
+                if _is_production:
+                    print(msg)
+                    sys.exit(1)
+                else:
+                    print(msg)
     # 自动导入 API Key
     try:
         from database import get_key_by_value, add_key
@@ -157,25 +266,50 @@ async def startup():
     pending = load_pending_tasks()
     if pending:
         print(f"[RECOVERY] Restoring {len(pending)} pending tasks")
-        task_store.update(pending)
+        # Tasks that were in-progress cannot be safely recovered
+        for tid, task in pending.items():
+            status = task.get("status", "submitting")
+            task_store[tid] = task
+            if status not in ("completed", "error", "failed"):
+                # Mark as failed and refund
+                uid = task.get("user_id")
+                charge = task.get("charge_points", 0)
+                if uid is not None and charge > 0:
+                    _try_refund_generation(task, uid, tid, charge, "服务重启后无法恢复，自动退款")
+                task["status"] = "error"
+                task["error"] = "Task failed: server restarted while task was in progress"
+                save_task_progress(tid, task)
+                print(f"  [RECOVERY] Task {tid} marked as failed (was {status})")
 
     # 启动僵死任务回收协程
     async def reap_stale_tasks():
-        """每60秒扫描一次，将僵死超过5分钟的task标记为error"""
+        """每60秒扫描一次，将僵死超过5分钟的task标记为error并退款"""
         while True:
-            await asyncio.sleep(60)
-            now = time.time()
-            stale_ids = []
-            for tid, task in list(task_store.items()):
-                if task.get("status") == "generating":
-                    elapsed = now - task.get("start_time", now)
-                    if elapsed > 300:  # 5 minutes
-                        stale_ids.append(tid)
-            for tid in stale_ids:
-                task_store[tid]["status"] = "error"
-                task_store[tid]["error"] = "Task timed out (no progress for >5 minutes)"
-            if stale_ids:
-                print(f"[REAPER] Marked {len(stale_ids)} stale task(s) as error")
+            try:
+                await asyncio.sleep(60)
+                now = time.time()
+                stale_ids = []
+                for tid, task in list(task_store.items()):
+                    if task.get("status") == "generating":
+                        elapsed = now - task.get("start_time", now)
+                        if elapsed > 300:  # 5 minutes
+                            stale_ids.append(tid)
+                for tid in stale_ids:
+                    task = task_store[tid]
+                    uid = task.get("user_id")
+                    charge = task.get("charge_points", 0)
+                    if uid is not None:
+                        _try_refund_generation(task, uid, tid, charge, "僵死任务超时回收退款")
+                    task["status"] = "error"
+                    task["error"] = "Task timed out (no progress for >5 minutes)"
+                    save_task_progress(tid, task)
+                    push_event(tid, {"status": "failed", "error": task["error"]})
+                    _active_tasks.discard(tid)
+                if stale_ids:
+                    logger.info(f"[REAPER] Marked {len(stale_ids)} stale task(s) as error (with refund if applicable)")
+            except Exception as e:
+                logger.error(f"[REAPER] Error in stale task reaper: {e}")
+                await asyncio.sleep(10)  # 出错后短暂等待再继续
 
     asyncio.create_task(reap_stale_tasks())
 
@@ -217,8 +351,40 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=100)
 
 
+class UserRegisterRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=50)
+    password: str = Field(min_length=12, max_length=128)
+    phone: str = Field(default="", max_length=30)
+    email: str = Field(default="", max_length=120)
+
+
+class CreateOrderRequest(BaseModel):
+    package_id: int = Field(gt=0)
+
+
+class CreditPackageRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    price_fen: int = Field(ge=0)
+    points: int = Field(gt=0)
+    bonus_points: int = Field(default=0, ge=0)
+    status: str = Field(default="active", pattern=r"^(active|inactive)$")
+    sort_order: int = Field(default=100, ge=0)
+
+
+class CreateCustomTypeRequest(BaseModel):
+    label: str = Field(min_length=1, max_length=100)
+    category: str = Field(default="自定义", max_length=50)
+
+
+class CreateApiKeyRequest(BaseModel):
+    key_value: str = Field(min_length=1, max_length=500)
+    name: str = Field(default="", max_length=100)
+    daily_limit: int = Field(default=200, ge=1, le=10000)
+
+
 # ========== 进度存储 ==========
 task_store: dict[str, dict] = {}
+_active_tasks: set[str] = set()  # Track running background tasks
 
 IMAGE_NAMES = [
     "模特图1", "模特图2", "模特图3", "模特图4", "模特图5",
@@ -247,12 +413,23 @@ def init_progress(total: int, creator_ip: str = "") -> str:
     return tid
 
 
+def get_task_for_request(task_id: str, request: Request, user: dict) -> dict:
+    p = task_store.get(task_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="任务不存在或已过期")
+
+    task_user_id = p.get("user_id")
+    if task_user_id is None or int(task_user_id) != int(user["id"]):
+        raise HTTPException(status_code=404, detail="任务不存在或已过期")
+    return p
+
+
 # ========== Apimart API 工具函数 ==========
 async def _apimart_request(url: str, method: str = "POST", json_body: dict = None, retries: int = 3):
     """带重试和多 Key 支持的 apimart API 请求"""
     key_row = key_manager.get_active_key()
     if not key_row:
-        raise HTTPException(status_code=503, detail="没有可用的 API Key")
+        raise HTTPException(status_code=409, detail="所有 API Key 均已失效，请到后台检查或添加新 Key")
 
     api_key = key_row["key_value"]
 
@@ -272,15 +449,19 @@ async def _apimart_request(url: str, method: str = "POST", json_body: dict = Non
                     key_manager.mark_success(api_key)
                     return resp.json()
 
-                # 认证错误 → 标记 Key 失败，换 Key 重试
-                if resp.status_code in (401, 402, 403):
+                # Only authentication/permission failures prove the key itself is bad.
+                if resp.status_code in (401, 403):
                     key_manager.mark_failure(api_key)
                     new_key = key_manager.get_active_key()
                     if new_key:
                         api_key = new_key["key_value"]
                         print(f"  Key 失效，切换到: {api_key[:15]}...")
                         continue
-                    raise HTTPException(status_code=502, detail="所有 API Key 均已失效")
+                    raise HTTPException(status_code=502, detail="所有 API Key 鉴权均失败，请到后台检查 Key 状态")
+
+                # Quota/payment failures should be surfaced, not counted as auth failure.
+                if resp.status_code == 402:
+                    raise HTTPException(status_code=402, detail="Apimart API Key 额度不足或账号未开通 (402)")
 
                 error_body = resp.json() if resp.text else {}
                 raise HTTPException(
@@ -293,8 +474,43 @@ async def _apimart_request(url: str, method: str = "POST", json_body: dict = Non
                 print(f"  [重试 {attempt+1}/{retries-1}] 网络错误，{delay}s 后重试...")
                 await asyncio.sleep(delay)
             else:
-                key_manager.mark_failure(api_key)
-                raise HTTPException(status_code=502, detail=f"Apimart 网络不可达: {str(e)}")
+                raise HTTPException(status_code=502, detail="上游 API 网络连接失败，请稍后重试")
+
+
+async def apimart_upload_image(image_url: str) -> str:
+    """将 base64 图片上传到 apimart，返回 hosted URL (72h 有效)。
+    如果已经是 HTTP URL，直接返回。"""
+    if image_url.startswith("http://") or image_url.startswith("https://"):
+        return image_url
+
+    m = DATA_URL_PATTERN.match(image_url)
+    if not m:
+        raise HTTPException(status_code=400, detail="图片格式无效，需为 HTTP URL 或 data:image/*;base64 格式")
+
+    mime = m.group(1)  # e.g. "image/jpeg"
+    b64_data = m.group(2)
+    ext = mime.split("/")[-1].replace("jpeg", "jpg")
+    raw_bytes = base64.b64decode(b64_data)
+
+    key_row = key_manager.get_active_key()
+    if not key_row:
+        raise HTTPException(status_code=409, detail="所有 API Key 均已失效")
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.post(
+            f"{APIMART_BASE}/uploads/images",
+            headers={"Authorization": f"Bearer {key_row['key_value']}"},
+            files={"file": (f"image.{ext}", raw_bytes, mime)},
+        )
+
+    if resp.status_code != 200:
+        error_body = resp.json() if resp.text else {}
+        msg = error_body.get("error", {}).get("message", f"Upload failed: {resp.status_code}")
+        raise HTTPException(status_code=502, detail=f"图片上传失败: {msg}")
+
+    uploaded_url = resp.json()["url"]
+    print(f"  [UPLOAD] Image uploaded: {uploaded_url[:80]}...")
+    return uploaded_url
 
 
 async def apimart_generate(prompt: str, reference_url: str = None, size: str = "1:1", resolution: str = "1k") -> str:
@@ -315,24 +531,18 @@ async def apimart_generate(prompt: str, reference_url: str = None, size: str = "
     if not task_id:
         raise HTTPException(status_code=502, detail="未返回 task_id")
 
-    # 等待
-    await asyncio.sleep(12)
+    # 等待（文档建议 10-20s）
+    await asyncio.sleep(15)
 
     # 轮询
-    for _ in range(30):
-        try:
-            task = await _apimart_request(f"{APIMART_BASE}/tasks/{task_id}", "GET")
-            status = task["data"].get("status")
-            if status == "completed":
-                url = task["data"]["result"]["images"][0]["url"][0]
-                return url
-            if status == "failed":
-                msg = task["data"].get("error", {}).get("message", "未知错误")
-                raise HTTPException(status_code=502, detail=f"任务失败: {msg}")
-        except HTTPException:
-            raise
-        except Exception as e:
-            print(f"  轮询出错: {e}")
+    for round_num in range(30):
+        qr = await _query_single_task(task_id)
+        if isinstance(qr, str) and qr != "failed":
+            return qr
+        if qr == "failed":
+            raise HTTPException(status_code=502, detail="图片生成任务失败")
+        if isinstance(qr, dict):
+            print(f"  [轮询 #{round_num+1}] status={qr['status']}, progress={qr.get('progress', 0)}")
         await asyncio.sleep(4)
 
     raise HTTPException(status_code=502, detail="任务轮询超时")
@@ -367,57 +577,87 @@ async def apimart_batch_generate(
 
     task_ids = [tid for _, tid in submissions]
     task_map = {tid: idx for idx, tid in submissions}
-    print(f"\n[PROGRESS] Submitted: {len(task_ids)}/{total}, waiting for processing...")
+    print(f"\n[PROGRESS] Submitted: {len(task_ids)}/{total}")
 
     if not task_ids:
         return [fallback_url] * total
 
-    # Step 2: 等待 12s
-    await asyncio.sleep(12)
+    # Step 2: 等待 15s（文档建议 10-20s）
+    await asyncio.sleep(15)
 
-    # Step 3: 批量轮询
+    # Step 3: 批量轮询 — 带早失败和超时保护
     results = [None] * total
+    no_progress_count = 0
+    MAX_NO_PROGRESS = 5  # 连续 5 轮无进展则提前终止
+
     for round_num in range(30):
         pending = [tid for tid in task_ids if results[task_map[tid]] is None]
         if not pending:
             break
 
+        completed_this_round = 0
+        fatal_error = None
+
         try:
-            # 逐个查询（批量接口可能不稳定，逐个更可靠）
             query_results = await asyncio.gather(
                 *[_query_single_task(tid) for tid in pending],
                 return_exceptions=True,
             )
 
-            completed = 0
             for tid, qr in zip(pending, query_results):
                 idx = task_map.get(tid)
                 if idx is None:
                     continue
-                if isinstance(qr, str):  # 成功返回 URL
+
+                if isinstance(qr, str) and qr != "failed":
+                    # 成功拿到 URL
                     results[idx] = qr
-                    completed += 1
+                    completed_this_round += 1
                     if on_progress:
                         on_progress(idx, qr)
                 elif qr == "failed":
-                    results[idx] = None
+                    results[idx] = None  # 标记为失败，最终用 fallback
+                    completed_this_round += 1
                     if on_progress:
                         on_progress(idx, None)
+                elif isinstance(qr, HTTPException):
+                    fatal_error = qr
+                    break
+                elif isinstance(qr, dict):
+                    pass  # pending/processing，继续等
+                # elif qr is None: 网络错误，继续等
 
-            remaining = len(pending) - completed
-            if remaining > 0:
-                print(f"  [轮询 #{round_num+1}] completed={completed}, 剩余 {remaining}/{total}")
         except Exception as e:
-            print(f"  [轮询 #{round_num+1}] 出错: {e}")
+            print(f"  [轮询 #{round_num+1}] 批量查询出错: {e}")
 
-        if results.count(None) == 0:
+        if fatal_error:
+            print(f"  [FATAL] 致命错误，终止轮询: {fatal_error.detail}")
+            for i, r in enumerate(results):
+                if r is None and on_progress:
+                    on_progress(i, fallback_url)
+            return [r if r else fallback_url for r in results]
+
+        # 本轮无进展计数
+        if completed_this_round == 0:
+            no_progress_count += 1
+            if no_progress_count >= MAX_NO_PROGRESS:
+                print(f"  [TIMEOUT] 连续 {MAX_NO_PROGRESS} 轮无进展，提前终止")
+                break
+        else:
+            no_progress_count = 0
+
+        remaining = sum(1 for r in results if r is None)
+        print(f"  [轮询 #{round_num+1}] +{completed_this_round} done, remaining {remaining}/{total}")
+
+        if remaining == 0:
             break
         await asyncio.sleep(4)
 
-    final_results = [url if url else fallback_url for url in results]
-    for idx, url in enumerate(results):
-        if url is None and on_progress:
-            on_progress(idx, fallback_url)
+    # 未完成的用 fallback
+    final_results = [r if r else fallback_url for r in results]
+    for i, r in enumerate(results):
+        if r is None and on_progress:
+            on_progress(i, fallback_url)
     return final_results
 
 
@@ -443,17 +683,42 @@ async def _submit_task(task: dict, index: int, total: int) -> tuple[int, str]:
         raise
 
 
-async def _query_single_task(task_id: str) -> str:
-    """查询单个任务，返回 URL 或 'failed'"""
+async def _query_single_task(task_id: str):
+    """查询单个任务状态。
+    返回:
+      str (URL) — completed，成功拿到图片
+      "failed" — failed / cancelled
+      dict {"status": ..., "progress": ...} — pending / processing，仍在进行中
+      None — 网络错误，可重试
+    异常:
+      HTTPException — 不可重试的致命错误 (由 _apimart_request 抛出的 401/402/429 等)
+    """
     try:
         task = await _apimart_request(f"{APIMART_BASE}/tasks/{task_id}", "GET")
-        status = task["data"].get("status")
+        data = task.get("data", {})
+        status = data.get("status")
+
         if status == "completed":
-            return task["data"]["result"]["images"][0]["url"][0]
-        if status == "failed":
+            try:
+                return data["result"]["images"][0]["url"][0]
+            except (KeyError, IndexError):
+                print(f"  [WARN] Task {task_id} completed but result format unexpected")
+                return "failed"
+
+        if status in ("failed", "cancelled"):
+            error_msg = data.get("error", {}).get("message", "未知错误")
+            print(f"  [WARN] Task {task_id} {status}: {error_msg}")
             return "failed"
-        return None  # still processing
-    except Exception:
+
+        # pending / processing — 还在进行中
+        return {"status": status, "progress": data.get("progress", 0)}
+
+    except HTTPException:
+        # _apimart_request 已处理 401/402/429 等，直接向上抛
+        raise
+    except Exception as e:
+        # 网络错误等，返回 None 让上层继续重试
+        print(f"  [WARN] Query task {task_id} error: {e}")
         return None
 
 
@@ -479,14 +744,144 @@ async def health():
     return {"status": "ok"}
 
 
+@app.post("/auth/register")
+@limiter.limit("10/minute")
+async def user_register(request: Request, req: UserRegisterRequest):
+    username = sanitize_input(req.username, 50)
+    phone = sanitize_input(req.phone, 30)
+    email = sanitize_input(req.email, 120)
+    try:
+        validate_password_strength(req.password)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        user_id = create_customer(username, hash_password(req.password), phone=phone, email=email)
+    except ValueError:
+        raise HTTPException(status_code=409, detail="用户名已存在")
+    token = create_customer_token(user_id, username)
+    payload = {
+        "user": {"id": user_id, "username": username, "phone": phone, "email": email, "is_unlimited": False},
+        "csrf_token": "",
+    }
+    from security import verify_token
+    token_payload = verify_token(token) or {}
+    payload["csrf_token"] = token_payload.get("jti", "")
+    payload["wallet"] = get_wallet(user_id)
+    resp = JSONResponse(content=payload)
+    _set_user_cookie(resp, token)
+    return resp
+
+
+@app.post("/auth/login")
+@limiter.limit("10/minute")
+async def user_login(request: Request, req: LoginRequest):
+    result = await login_customer(sanitize_input(req.username, 50), req.password)
+    from security import verify_token
+    access_token = result.pop("access_token")
+    token_payload = verify_token(access_token) or {}
+    result["csrf_token"] = token_payload.get("jti", "")
+    result["wallet"] = get_wallet(int(result["user"]["id"]))
+    resp = JSONResponse(content=result)
+    _set_user_cookie(resp, access_token)
+    return resp
+
+
+@app.post("/auth/logout")
+async def user_logout(request: Request):
+    user = await authenticate_customer(request)
+    _verify_user_csrf(request, user)
+    # Revoke the current token's jti
+    token = request.cookies.get("user_access_token", "")
+    if token:
+        from security import verify_token
+        from database import revoke_jti
+        payload = verify_token(token)
+        if payload and payload.get("jti"):
+            exp = payload.get("exp", "")
+            revoke_jti(payload["jti"], str(exp) if exp else "")
+    resp = JSONResponse(content={"message": "logged out"})
+    _clear_user_cookie(resp)
+    return resp
+
+
+@app.get("/auth/me")
+async def user_me(request: Request):
+    try:
+        user = await authenticate_customer(request)
+    except HTTPException:
+        return {"user": None, "wallet": None, "csrf_token": "", "generation_cost_points": get_generation_cost_points()}
+    return {
+        "user": user,
+        "wallet": get_wallet(int(user["id"])),
+        "csrf_token": user.get("csrf_token", ""),
+        "generation_cost_points": get_generation_cost_points(),
+    }
+
+
+@app.get("/user/wallet")
+async def user_wallet(user: dict = Depends(authenticate_customer)):
+    return {"wallet": get_wallet(int(user["id"])), "generation_cost_points": get_generation_cost_points()}
+
+
+@app.get("/user/packages")
+async def user_packages():
+    return {"packages": list_credit_packages(include_inactive=False)}
+
+
+@app.post("/user/orders")
+@limiter.limit("20/minute")
+async def user_create_order(request: Request, req: CreateOrderRequest, user: dict = Depends(authenticate_customer)):
+    _verify_user_csrf(request, user)
+    order_no = f"MOCK{int(time.time())}{uuid.uuid4().hex[:8].upper()}"
+    try:
+        order = create_order(int(user["id"]), req.package_id, order_no)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="套餐不存在或已下架")
+    return {"order": order, "payment": {"provider": "mock", "status": "pending"}}
+
+
+@app.get("/user/orders")
+async def user_orders(user: dict = Depends(authenticate_customer)):
+    return {"orders": list_user_orders(int(user["id"]))}
+
+
+@app.get("/user/ledger")
+async def user_ledger(user: dict = Depends(authenticate_customer)):
+    return {"items": list_user_ledger(int(user["id"]))}
+
+
+@app.get("/user/history")
+async def user_history(user: dict = Depends(authenticate_customer)):
+    return {"items": list_user_history(int(user["id"]))}
+
+
 @app.post("/api/generate")
 @limiter.limit("10/minute")
-async def generate_images(request: Request, req: GenerateRequest, _=Depends(verify_api_auth)):
+async def generate_images(
+    request: Request,
+    req: GenerateRequest,
+    _=Depends(verify_api_auth),
+    user: dict = Depends(authenticate_customer),
+):
     start = time.time()
     task_id = str(uuid.uuid4())
+    user_id = int(user["id"])
+    charge_points = get_generation_cost_points()
+    charge_state = {"charged": False, "refunded": False}
 
     try:
+        _verify_user_csrf(request, user)
+        if req.generate_type == "all":
+            raise HTTPException(status_code=400, detail="完整生成请使用 /api/generate/async")
         validate_image_data(str(req.image_url))
+        ensure_api_key_available()
+        try:
+            charge_generation(user_id, task_id, charge_points, f"生成任务 {task_id}")
+            charge_state["charged"] = True
+        except ValueError:
+            raise HTTPException(status_code=402, detail="积分不足，请先充值")
+        # 上传参考图到 apimart（base64 → hosted URL，72h 有效）
+        hosted_image_url = await apimart_upload_image(str(req.image_url))
         # 1. 智能品类匹配
         category = match_category(req.product_type)
         model_code = select_model(req.model, category)
@@ -534,24 +929,30 @@ async def generate_images(request: Request, req: GenerateRequest, _=Depends(veri
         if req.generate_type == "comparison":
             prompt = build_comparison_prompt(req.product_type, category)
             print("[COMPARISON] Generating comparison image...")
-            url = await apimart_generate(prompt, req.image_url, req.prompt_size, req.prompt_resolution)
-            add_history(task_id=task_id, api_key_id=None, product_type=sanitize_input(req.product_type, 50),
-                        country=sanitize_input(req.country, 20), model=model_code, status="completed", elapsed_seconds=round(time.time() - start, 1))
+            url = await apimart_generate(prompt, hosted_image_url, req.prompt_size, req.prompt_resolution)
+            add_history(task_id=task_id, api_key_id=None, user_id=user_id, product_type=sanitize_input(req.product_type, 50),
+                        country=sanitize_input(req.country, 20), model=model_code, status="completed",
+                        elapsed_seconds=round(time.time() - start, 1), charge_points=charge_points,
+                        description_snapshot=sanitize_input(req.product_type, 200),
+                        preview_images_json=_preview_images([url]))
             return {"success": True, "data": {"comparisonImage": url}}
 
         if req.generate_type == "detail":
             prompt = build_detail_prompt(req.product_type, category)
             print("[DETAIL] Generating detail image...")
-            url = await apimart_generate(prompt, req.image_url, req.prompt_size, req.prompt_resolution)
-            add_history(task_id=task_id, api_key_id=None, product_type=sanitize_input(req.product_type, 50),
-                        country=sanitize_input(req.country, 20), model=model_code, status="completed", elapsed_seconds=round(time.time() - start, 1))
+            url = await apimart_generate(prompt, hosted_image_url, req.prompt_size, req.prompt_resolution)
+            add_history(task_id=task_id, api_key_id=None, user_id=user_id, product_type=sanitize_input(req.product_type, 50),
+                        country=sanitize_input(req.country, 20), model=model_code, status="completed",
+                        elapsed_seconds=round(time.time() - start, 1), charge_points=charge_points,
+                        description_snapshot=sanitize_input(req.product_type, 200),
+                        preview_images_json=_preview_images([url]))
             return {"success": True, "data": {"detailImage": url}}
 
         if req.generate_type == "test":
             idx = max(0, min(req.style_index, 10))
             print(f"[TEST] Test mode: generating image {idx+1}/11...")
             gen_result = generate_all_tasks(
-                req.product_type, req.image_url, req.country, req.model,
+                req.product_type, hosted_image_url, req.country, req.model,
                 req.prompt_size, req.prompt_resolution,
                 category=category, country_config=country_config,
                 model_code=model_code, model_profile=model_profile,
@@ -565,17 +966,19 @@ async def generate_images(request: Request, req: GenerateRequest, _=Depends(veri
             model_profile = gen_result["model_profile"]
             model_styles = MODEL_STYLE_NAMES
             tasks_detail = _build_tasks_detail(gen_result["tasks"], [url])
-            add_history(task_id=task_id, api_key_id=None, product_type=sanitize_input(req.product_type, 50),
+            add_history(task_id=task_id, api_key_id=None, user_id=user_id, product_type=sanitize_input(req.product_type, 50),
                         country=sanitize_input(req.country, 20), model=model_code, status="completed",
                         elapsed_seconds=round(time.time() - start, 1),
                         llm_request=llm_request_data, llm_response=llm_response_data,
-                        tasks_detail=tasks_detail)
+                        tasks_detail=tasks_detail, charge_points=charge_points,
+                        description_snapshot=sanitize_input(gen_result.get("description", req.product_type), 500),
+                        preview_images_json=_preview_images([url]))
             return {
                 "success": True,
                 "data": {
                     "modelImages": [url],
                     "modelStyles": [model_styles[idx]],
-                    "originalImage": req.image_url,
+                    "originalImage": hosted_image_url,
                     "category": gen_result["category"],
                     "model": model_profile,
                     "country": gen_result["country_config"],
@@ -588,14 +991,14 @@ async def generate_images(request: Request, req: GenerateRequest, _=Depends(veri
 
         # 3. 全量生成模式
         gen_result = generate_all_tasks(
-            req.product_type, req.image_url, req.country, req.model,
+            req.product_type, hosted_image_url, req.country, req.model,
             req.prompt_size, req.prompt_resolution,
             category=category, country_config=country_config,
             model_code=model_code, model_profile=model_profile,
             llm_config=llm_config,
         )
 
-        urls = await apimart_batch_generate(gen_result["tasks"], req.image_url)
+        urls = await apimart_batch_generate(gen_result["tasks"], hosted_image_url)
 
         model_images = urls[:11]
         white_bg_url = urls[11]
@@ -605,17 +1008,19 @@ async def generate_images(request: Request, req: GenerateRequest, _=Depends(veri
         elapsed = time.time() - start
         success_count = sum(1 for u in urls if u and not u.startswith("data:"))
         tasks_detail = _build_tasks_detail(gen_result["tasks"], urls)
-        add_history(task_id=task_id, api_key_id=None, product_type=sanitize_input(req.product_type, 50),
+        add_history(task_id=task_id, api_key_id=None, user_id=user_id, product_type=sanitize_input(req.product_type, 50),
                     country=sanitize_input(req.country, 20), model=model_code, total_images=14,
                     success_count=success_count, status="completed", elapsed_seconds=round(elapsed, 1),
                     llm_request=llm_request_data, llm_response=llm_response_data,
-                    tasks_detail=tasks_detail)
+                    tasks_detail=tasks_detail, charge_points=charge_points,
+                    description_snapshot=sanitize_input(gen_result.get("description", req.product_type), 500),
+                    preview_images_json=_preview_images(model_images))
         print(f"[DONE] Completed! Elapsed {elapsed:.1f}s")
 
         return {
             "success": True,
             "data": {
-            "originalImage": req.image_url,
+            "originalImage": hosted_image_url,
             "modelImages": model_images,
             "modelStyles": MODEL_STYLE_NAMES,
             "displayImage": white_bg_url,
@@ -651,21 +1056,57 @@ async def generate_images(request: Request, req: GenerateRequest, _=Depends(veri
             "tags": gen_result.get("tags", country_config["hashtags"]),
         },
     }
+    except HTTPException as e:
+        print(f"[ERROR] Sync task {task_id} failed: {e.detail}")
+        if charge_state["charged"]:
+            _try_refund_generation(charge_state, user_id, task_id, charge_points, "生成失败自动退回")
+        add_history(task_id=task_id, api_key_id=None, user_id=user_id, product_type=sanitize_input(req.product_type, 50),
+                    country=sanitize_input(req.country, 20), model="", status="failed", error_msg=str(e.detail)[:500],
+                    description_snapshot=sanitize_input(req.product_type, 500))
+        raise
     except Exception as e:
         print(f"[ERROR] Sync task {task_id} failed: {e}")
-        add_history(task_id=task_id, api_key_id=None, product_type=sanitize_input(req.product_type, 50),
-                    country=sanitize_input(req.country, 20), model="", status="failed", error_msg=str(e)[:500])
-        return {"success": False, "error": str(e)}
+        if charge_state["charged"]:
+            _try_refund_generation(charge_state, user_id, task_id, charge_points, "生成失败自动退回")
+        add_history(task_id=task_id, api_key_id=None, user_id=user_id, product_type=sanitize_input(req.product_type, 50),
+                    country=sanitize_input(req.country, 20), model="", status="failed", error_msg=str(e)[:500],
+                    description_snapshot=sanitize_input(req.product_type, 500))
+        return JSONResponse(status_code=500, content={"success": False, "error": "Internal server error"})
 
 
 # ========== 异步进度端点 ==========
 
-async def _run_generation_background(task_id: str, req: GenerateRequest):
+def _cleanup_active_task(task_id: str, task: asyncio.Task):
+    """Done-callback: always clean up _active_tasks, handle unexpected exceptions."""
+    _active_tasks.discard(task_id)
+    if task.cancelled():
+        logger.warning(f"[TASK] Background task {task_id} was cancelled")
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(f"[TASK] Background task {task_id} raised: {exc}")
+        # If task_store still shows non-terminal state, force terminal + refund
+        p = task_store.get(task_id)
+        if p and p.get("status") not in ("completed", "error", "failed"):
+            uid = p.get("user_id")
+            charge = p.get("charge_points", 0)
+            if uid is not None and charge > 0:
+                _try_refund_generation(p, uid, task_id, charge, "任务异常逃逸自动退款")
+            p["status"] = "error"
+            p["error"] = f"Task failed with unexpected error: {exc}"
+            save_task_progress(task_id, p)
+            push_event(task_id, {"status": "failed", "error": p["error"]})
+
+
+async def _run_generation_background(task_id: str, req: GenerateRequest, user_id: int, charge_points: int):
     """后台执行完整的图片生成流程，并更新进度"""
     try:
         progress = task_store[task_id]
         progress["status"] = "submitting"
         push_event(task_id, {"status": "submitting", "total": progress["total"], "completed": 0})
+
+        # 上传参考图到 apimart（base64 → hosted URL，72h 有效）
+        hosted_image_url = await apimart_upload_image(req.image_url)
 
         # 品类匹配
         category = match_category(req.product_type)
@@ -708,7 +1149,7 @@ async def _run_generation_background(task_id: str, req: GenerateRequest):
 
         # 生成任务
         gen_result = generate_all_tasks(
-            req.product_type, req.image_url,
+            req.product_type, hosted_image_url,
             req.country, req.model,
             req.prompt_size, req.prompt_resolution,
             category=category,
@@ -748,7 +1189,7 @@ async def _run_generation_background(task_id: str, req: GenerateRequest):
 
         # 批量生成
         urls = await apimart_batch_generate(
-            gen_result["tasks"], req.image_url, on_progress
+            gen_result["tasks"], hosted_image_url, on_progress
         )
 
         # 构建结果
@@ -762,7 +1203,7 @@ async def _run_generation_background(task_id: str, req: GenerateRequest):
         progress["result"] = {
             "success": True,
             "data": {
-                "originalImage": req.image_url,
+                "originalImage": hosted_image_url,
                 "modelImages": model_images,
                 "modelStyles": MODEL_STYLE_NAMES,
                 "displayImage": white_bg_url,
@@ -780,6 +1221,7 @@ async def _run_generation_background(task_id: str, req: GenerateRequest):
         progress["status"] = "completed"
         save_task_progress(task_id, progress)
         push_event(task_id, {"status": "completed", "result": progress["result"]})
+        _active_tasks.discard(task_id)
         print(f"[DONE] Background task {task_id} completed")
 
         # 写入历史记录
@@ -787,6 +1229,7 @@ async def _run_generation_background(task_id: str, req: GenerateRequest):
         add_history(
             task_id=task_id,
             api_key_id=None,
+            user_id=user_id,
             product_type=sanitize_input(req.product_type, 50),
             country=sanitize_input(req.country, 20),
             model=model_code,
@@ -799,50 +1242,79 @@ async def _run_generation_background(task_id: str, req: GenerateRequest):
             llm_request=llm_request_data,
             llm_response=llm_response_data,
             tasks_detail=tasks_detail_json,
+            charge_points=charge_points,
+            description_snapshot=sanitize_input(gen_result.get("description", req.product_type), 500),
+            preview_images_json=_preview_images(model_images),
         )
 
     except Exception as e:
         print(f"[ERROR] Background task {task_id} failed: {e}")
+        _active_tasks.discard(task_id)
         p = task_store.get(task_id)
         if p:
+            user_id_val = p.get("user_id", user_id)
+            charge_val = p.get("charge_points", charge_points)
+            _try_refund_generation(p, user_id_val, task_id, charge_val, "生成失败自动退回")
             p["status"] = "error"
             p["error"] = str(e)
             save_task_progress(task_id, p)
             push_event(task_id, {"status": "failed", "error": str(e)})
+        else:
+            _try_refund_generation({}, user_id, task_id, charge_points, "生成失败自动退回")
         add_history(
             task_id=task_id,
             api_key_id=None,
+            user_id=user_id,
             product_type=sanitize_input(req.product_type, 50),
             country=sanitize_input(req.country, 20),
             model=sanitize_input(req.model, 20),
             status="failed",
             error_msg=str(e)[:500],
+            description_snapshot=sanitize_input(req.product_type, 500),
         )
 
 
 @app.post("/api/generate/async")
 @limiter.limit("20/minute")
-async def generate_async(request: Request, req: GenerateRequest, _=Depends(verify_api_auth)):
+async def generate_async(
+    request: Request,
+    req: GenerateRequest,
+    _=Depends(verify_api_auth),
+    user: dict = Depends(authenticate_customer),
+):
     """异步启动图片生成，立即返回 task_id"""
+    _verify_user_csrf(request, user)
     validate_image_data(str(req.image_url))
+    ensure_api_key_available()
     client_ip = request.client.host if request.client else "unknown"
     task_id = init_progress(14, creator_ip=client_ip)
-    asyncio.create_task(_run_generation_background(task_id, req))
+    user_id = int(user["id"])
+    charge_points = get_generation_cost_points()
+    try:
+        charge_generation(user_id, task_id, charge_points, f"生成任务 {task_id}")
+    except ValueError:
+        task_store.pop(task_id, None)
+        raise HTTPException(status_code=402, detail="积分不足，请先充值")
+    task_store[task_id]["user_id"] = user_id
+    task_store[task_id]["charge_points"] = charge_points
+    save_task_progress(task_id, task_store[task_id])
+    _active_tasks.add(task_id)
+    task = asyncio.create_task(_run_generation_background(task_id, req, user_id, charge_points))
+    task.add_done_callback(lambda t: _cleanup_active_task(task_id, t))
     print(f"[START] Background task created: {task_id} (IP: {client_ip})")
-    return {"task_id": task_id}
+    return {"task_id": task_id, "charge_points": charge_points}
 
 
 @app.get("/api/generate/status/{task_id}")
 @limiter.limit("30/minute")
-async def generate_status(request: Request, task_id: str, _=Depends(verify_api_auth)):
+async def generate_status(
+    request: Request,
+    task_id: str,
+    _=Depends(verify_api_auth),
+    user: dict = Depends(authenticate_customer),
+):
     """查询实时进度（仅允许任务创建者查询）"""
-    p = task_store.get(task_id)
-    if not p:
-        raise HTTPException(status_code=404, detail="任务不存在或已过期")
-
-    client_ip = request.client.host if request.client else "unknown"
-    if p.get("creator_ip") and p["creator_ip"] != "unknown" and p["creator_ip"] != client_ip:
-        raise HTTPException(status_code=404, detail="任务不存在或已过期")
+    p = get_task_for_request(task_id, request, user)
 
     elapsed = time.time() - p["start_time"]
     return {
@@ -860,10 +1332,14 @@ async def generate_status(request: Request, task_id: str, _=Depends(verify_api_a
 
 
 @app.get("/api/generate/status/{task_id}/stream")
-async def generate_status_stream(request: Request, task_id: str, _=Depends(verify_api_auth)):
+async def generate_status_stream(
+    request: Request,
+    task_id: str,
+    _=Depends(verify_api_auth),
+    user: dict = Depends(authenticate_customer),
+):
     """SSE 实时进度流"""
-    if task_id not in task_store:
-        raise HTTPException(status_code=404, detail="任务不存在")
+    get_task_for_request(task_id, request, user)
     return StreamingResponse(
         sse_stream(task_id),
         media_type="text/event-stream",
@@ -885,11 +1361,9 @@ async def list_custom_types():
 
 @app.post("/api/custom-types")
 @limiter.limit("30/minute")
-async def create_custom_type(request: Request, body: dict):
-    label = sanitize_input(body.get("label", ""), 100)
-    category = sanitize_input(body.get("category", "自定义"), 50)
-    if not label:
-        raise HTTPException(status_code=400, detail="类型名称不能为空")
+async def create_custom_type(request: Request, req: CreateCustomTypeRequest):
+    label = sanitize_input(req.label, 100)
+    category = sanitize_input(req.category, 50)
     tid = add_custom_type(label, category)
     return {"id": tid, "label": label, "category": category}
 
@@ -939,7 +1413,12 @@ async def admin_me(user: dict = Depends(authenticate)):
 
 @app.post("/admin/refresh")
 async def admin_refresh(user: dict = Depends(authenticate)):
-    """刷新 token（延长有效期）"""
+    """刷新 token（延长有效期）— 旧 token 被吊销"""
+    from database import revoke_jti
+    # Revoke old token's jti
+    if user.get("jti"):
+        exp = user.get("exp", "")
+        revoke_jti(user["jti"], str(exp) if exp else "")
     new_token = refresh_token(user)
     expires_in = JWT_EXPIRE_MINUTES * 60
     resp = JSONResponse(content={
@@ -961,7 +1440,16 @@ async def admin_refresh(user: dict = Depends(authenticate)):
 
 @app.post("/admin/logout")
 async def admin_logout(request: Request, _csrf=Depends(verify_csrf)):
-    """登出 — 清除 cookie"""
+    """登出 — 清除 cookie 并吊销 token"""
+    # Revoke the current token's jti
+    token = request.cookies.get("access_token", "")
+    if token:
+        from security import verify_token
+        from database import revoke_jti
+        payload = verify_token(token)
+        if payload and payload.get("jti"):
+            exp = payload.get("exp", "")
+            revoke_jti(payload["jti"], str(exp) if exp else "")
     resp = JSONResponse(content={"message": "已登出"})
     resp.set_cookie(
         key="access_token",
@@ -970,6 +1458,7 @@ async def admin_logout(request: Request, _csrf=Depends(verify_csrf)):
         samesite="lax",
         path="/",
         max_age=0,
+        secure=COOKIE_SECURE,
     )
     return resp
 
@@ -984,23 +1473,18 @@ async def admin_dashboard(request: Request, user: dict = Depends(authenticate)):
 
 
 @app.get("/admin/api-keys")
-async def list_api_keys(show_full: bool = False, user: dict = Depends(authenticate)):
-    """列出所有 API Key（默认脱敏，show_full=true 返回完整 Key）"""
-    if show_full:
-        return {"keys": get_all_keys()}
+async def list_api_keys(user: dict = Depends(authenticate)):
+    """列出所有 API Key（脱敏显示）"""
     return {"keys": get_all_keys_masked()}
 
 
 @app.post("/admin/api-keys")
 @limiter.limit("10/minute")
-async def create_api_key(request: Request, req: dict, user: dict = Depends(authenticate), _csrf=Depends(verify_csrf)):
+async def create_api_key(request: Request, req: CreateApiKeyRequest, user: dict = Depends(authenticate), _csrf=Depends(verify_csrf)):
     """添加 API Key"""
-    key_value = sanitize_input(req.get("key_value", ""), 500)
-    name = sanitize_input(req.get("name", ""), 100)
-    daily_limit = req.get("daily_limit", 200)
-    if not key_value:
-        raise HTTPException(status_code=400, detail="Key 值不能为空")
-    kid = add_key(key_value, name, int(daily_limit))
+    key_value = sanitize_input(req.key_value, 500)
+    name = sanitize_input(req.name, 100)
+    kid = add_key(key_value, name, req.daily_limit)
     return {"id": kid, "message": "Key 添加成功"}
 
 
@@ -1061,6 +1545,92 @@ async def admin_history_detail(history_id: int, user: dict = Depends(authenticat
     return detail
 
 
+@app.get("/admin/credit-packages")
+async def admin_credit_packages(user: dict = Depends(authenticate)):
+    return {
+        "packages": list_credit_packages(include_inactive=True),
+        "generation_cost_points": get_generation_cost_points(),
+    }
+
+
+@app.post("/admin/credit-packages")
+@limiter.limit("20/minute")
+async def admin_create_credit_package(
+    request: Request,
+    req: CreditPackageRequest,
+    user: dict = Depends(authenticate),
+    _csrf=Depends(verify_csrf),
+):
+    package_id = upsert_credit_package(
+        req.name,
+        req.price_fen,
+        req.points,
+        req.bonus_points,
+        req.status,
+        req.sort_order,
+    )
+    return {"id": package_id}
+
+
+@app.put("/admin/credit-packages/{package_id}")
+@limiter.limit("20/minute")
+async def admin_update_credit_package(
+    request: Request,
+    package_id: int,
+    req: CreditPackageRequest,
+    user: dict = Depends(authenticate),
+    _csrf=Depends(verify_csrf),
+):
+    try:
+        upsert_credit_package(
+            req.name,
+            req.price_fen,
+            req.points,
+            req.bonus_points,
+            req.status,
+            req.sort_order,
+            package_id=package_id,
+        )
+    except ValueError:
+        raise HTTPException(status_code=404, detail="套餐不存在")
+    return {"message": "updated"}
+
+
+@app.put("/admin/generation-cost")
+@limiter.limit("20/minute")
+async def admin_update_generation_cost(
+    request: Request,
+    req: dict,
+    user: dict = Depends(authenticate),
+    _csrf=Depends(verify_csrf),
+):
+    points = int(req.get("points", 10))
+    if points < 1:
+        raise HTTPException(status_code=400, detail="扣费积分必须大于 0")
+    set_config("generation_cost_points", str(points))
+    return {"generation_cost_points": points}
+
+
+@app.get("/admin/orders")
+async def admin_orders(user: dict = Depends(authenticate)):
+    return {"orders": list_all_orders()}
+
+
+@app.post("/admin/orders/{order_no}/mark-paid")
+@limiter.limit("20/minute")
+async def admin_mark_order_paid(
+    request: Request,
+    order_no: str,
+    user: dict = Depends(authenticate),
+    _csrf=Depends(verify_csrf),
+):
+    try:
+        order = mark_order_paid(sanitize_input(order_no, 80), provider_trade_no=f"mock-{uuid.uuid4().hex[:10]}")
+    except ValueError:
+        raise HTTPException(status_code=404, detail="订单不存在或状态不可入账")
+    return {"order": order}
+
+
 @app.get("/admin/health")
 async def admin_health(user: dict = Depends(authenticate)):
     """系统健康状态"""
@@ -1074,12 +1644,6 @@ async def admin_health(user: dict = Depends(authenticate)):
 
 
 # ========== LLM 配置管理端点 ==========
-
-def mask_api_key(key: str) -> str:
-    """脱敏显示 API Key，仅保留后 4 位"""
-    if len(key) <= 8:
-        return "****" + key[-4:]
-    return key[:4] + "****" + key[-4:]
 
 
 @app.get("/admin/llm-config")
@@ -1104,9 +1668,7 @@ async def update_llm_config(request: Request, body: dict, user: dict = Depends(a
         if val:
             set_config("llm_api_key", val)
         else:
-            from database import get_db
-            get_db().execute("DELETE FROM system_config WHERE key = 'llm_api_key'")
-            get_db().commit()
+            set_config("llm_api_key", "")
     if "model" in body:
         val = body["model"].strip()
         if val:
