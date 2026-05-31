@@ -1492,6 +1492,7 @@ async def create_api_key(request: Request, req: CreateApiKeyRequest, user: dict 
 @limiter.limit("10/minute")
 async def modify_api_key(request: Request, key_id: int, req: dict, user: dict = Depends(authenticate), _csrf=Depends(verify_csrf)):
     """更新 API Key"""
+    logger.info(f"[BALANCE] PUT /admin/api-keys/{key_id} - body: {req}")
     kwargs = {}
     if "name" in req:
         kwargs["name"] = sanitize_input(req["name"], 100)
@@ -1499,7 +1500,14 @@ async def modify_api_key(request: Request, key_id: int, req: dict, user: dict = 
         kwargs["is_active"] = int(req["is_active"])
     if "daily_limit" in req:
         kwargs["daily_limit"] = int(req["daily_limit"])
+    if "balance_usd" in req:
+        balance = float(req["balance_usd"])
+        if balance < 0:
+            raise HTTPException(status_code=400, detail="balance_usd must be >= 0")
+        kwargs["balance_usd"] = balance
+    logger.info(f"[BALANCE] kwargs to update: {kwargs}")
     ok = db_update_key(key_id, **kwargs)
+    logger.info(f"[BALANCE] db_update_key returned: {ok}")
     if not ok:
         raise HTTPException(status_code=404, detail="Key 不存在")
     return {"message": "更新成功"}

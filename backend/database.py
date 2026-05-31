@@ -37,6 +37,7 @@ def init_db():
             last_used_at TEXT,
             total_used INTEGER DEFAULT 0,
             fail_count INTEGER DEFAULT 0,
+            balance_usd REAL DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now')),
             updated_at TEXT DEFAULT (datetime('now'))
         );
@@ -189,6 +190,10 @@ def init_db():
         db.execute("ALTER TABLE users ADD COLUMN locked_until TEXT")
     if "last_login" not in user_cols:
         db.execute("ALTER TABLE users ADD COLUMN last_login TEXT")
+    # Migration: add balance_usd to api_keys
+    key_cols = [r[1] for r in db.execute("PRAGMA table_info('api_keys')").fetchall()]
+    if "balance_usd" not in key_cols:
+        db.execute("ALTER TABLE api_keys ADD COLUMN balance_usd REAL DEFAULT 0")
     db.commit()
     db.executescript("""
         CREATE TABLE IF NOT EXISTS task_store (
@@ -318,18 +323,26 @@ def add_key(key_value: str, name: str = "", daily_limit: int = 100) -> int:
 
 
 def update_key(key_id: int, **kwargs) -> bool:
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"[BALANCE] update_key called with key_id={key_id}, kwargs={kwargs}")
     db = get_db()
-    allowed = {"name", "is_active", "daily_limit"}
+    allowed = {"name", "is_active", "daily_limit", "balance_usd"}
     updates = {k: v for k, v in kwargs.items() if k in allowed}
+    logger.info(f"[BALANCE] updates after filtering: {updates}")
     if not updates:
+        logger.warning(f"[BALANCE] No allowed fields to update for key_id={key_id}")
         return False
     if updates.get("is_active") == 1:
         updates["fail_count"] = 0
     updates["updated_at"] = datetime.now().isoformat()
     set_clause = ", ".join(f"{k} = ?" for k in updates)
     vals = list(updates.values()) + [key_id]
+    logger.info(f"[BALANCE] SQL: UPDATE api_keys SET {set_clause} WHERE id = ?")
+    logger.info(f"[BALANCE] Values: {vals}")
     cur = db.execute(f"UPDATE api_keys SET {set_clause} WHERE id = ?", vals)
     db.commit()
+    logger.info(f"[BALANCE] Updated {cur.rowcount} rows")
     return cur.rowcount > 0
 
 

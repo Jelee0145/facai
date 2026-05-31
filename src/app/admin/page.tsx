@@ -11,6 +11,8 @@ interface KeyHealth {
   daily_limit: number;
   fail_count: number;
   usage_pct: number;
+  balance_usd: number;
+  remaining_quota: number;
 }
 
 interface DashboardStats {
@@ -27,6 +29,8 @@ export default function DashboardPage() {
   const { fetchWithAuth } = useAuth();
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [editingKeyId, setEditingKeyId] = useState<number | null>(null);
+  const [balanceInput, setBalanceInput] = useState<string>('');
 
   const load = () => {
     setError(null);
@@ -43,6 +47,47 @@ export default function DashboardPage() {
   };
 
   useEffect(() => { load(); }, [fetchWithAuth]);
+
+  const handleUpdateBalance = (keyId: number) => {
+    const key = stats?.keys_health?.keys.find(k => k.id === keyId);
+    setEditingKeyId(keyId);
+    setBalanceInput(key?.balance_usd?.toString() || '0');
+  };
+
+  const submitBalanceUpdate = async () => {
+    if (editingKeyId === null) return;
+    const balance = parseFloat(balanceInput);
+    if (isNaN(balance) || balance < 0) {
+      alert('请输入有效的余额金额');
+      return;
+    }
+
+    try {
+      console.log(`[BALANCE] Updating key ${editingKeyId} with balance ${balance}`);
+      const url = `/api/admin/api-keys/${editingKeyId}`;
+      console.log(`[BALANCE] Request URL: ${url}`);
+      const res = await fetchWithAuth(url, {
+        method: 'PUT',
+        body: JSON.stringify({ balance_usd: balance }),
+      });
+      console.log(`[BALANCE] Response status: ${res.status}`);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        console.error('Balance update failed:', res.status, err);
+        throw new Error(err.detail || '更新失败');
+      }
+      setEditingKeyId(null);
+      load();
+    } catch (e) {
+      console.error('Balance update error:', e);
+      alert(`设置余额失败: ${e instanceof Error ? e.message : '未知错误'}`);
+    }
+  };
+
+  const cancelBalanceUpdate = () => {
+    setEditingKeyId(null);
+    setBalanceInput('');
+  };
 
   if (error) return (
     <div className="text-red-400 bg-red-900/30 border border-red-800 rounded-xl p-4">
@@ -95,6 +140,58 @@ export default function DashboardPage() {
             <div className="flex justify-between text-xs text-gray-500 mt-1">
               <span>{k.today_used} / {k.daily_limit}</span>
               <span>{k.usage_pct}%</span>
+            </div>
+
+            {/* Balance Information */}
+            <div className="flex items-center justify-between mt-3 pt-3 border-t border-gray-800">
+              {editingKeyId === k.id ? (
+                <div className="flex items-center gap-2 flex-1">
+                  <span className="text-gray-400">$</span>
+                  <input
+                    type="number"
+                    value={balanceInput}
+                    onChange={(e) => setBalanceInput(e.target.value)}
+                    className="w-24 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm text-white focus:outline-none focus:border-purple-500"
+                    min="0"
+                    step="0.01"
+                    autoFocus
+                  />
+                  <span className="text-gray-500 text-xs">
+                    = {Math.floor(parseFloat(balanceInput) / 0.006) || 0} 张
+                  </span>
+                  <button
+                    onClick={submitBalanceUpdate}
+                    className="text-xs px-2 py-1 bg-green-600 hover:bg-green-500 rounded text-white"
+                  >
+                    确认
+                  </button>
+                  <button
+                    onClick={cancelBalanceUpdate}
+                    className="text-xs px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-white"
+                  >
+                    取消
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <div className="text-sm text-gray-400">
+                    <span className="text-green-400 font-semibold">
+                      ${(k.balance_usd || 0).toFixed(2)}
+                    </span>
+                    <span className="text-gray-500 ml-2">
+                      剩余 <span className="text-purple-400 font-semibold">
+                        {k.remaining_quota || 0}
+                      </span> 张
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => handleUpdateBalance(k.id)}
+                    className="text-xs px-2 py-1 bg-gray-800 hover:bg-gray-700 rounded"
+                  >
+                    设置余额
+                  </button>
+                </>
+              )}
             </div>
           </div>
         ))}

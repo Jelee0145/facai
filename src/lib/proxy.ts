@@ -75,6 +75,7 @@ export async function proxyToBackend(
         ? `${targetPrefix}${subPath ? `/${subPath}` : ""}`
         : url.pathname;
       targetUrl = buildBackendUrl(path, url.search);
+      logger.log(`[PROXY] ${method} ${url.pathname} -> ${targetUrl}`);
     }
 
     // Build request headers, filtering based on forwardCookies
