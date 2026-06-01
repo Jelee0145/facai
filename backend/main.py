@@ -588,7 +588,6 @@ async def apimart_generate(prompt: str, reference_url: str = None, size: str = "
 
 async def apimart_batch_generate(
     tasks: list[dict],
-    fallback_url: str,
     on_progress: Optional[callable] = None,
 ) -> list[str]:
     """
@@ -618,7 +617,7 @@ async def apimart_batch_generate(
     print(f"\n[PROGRESS] Submitted: {len(task_ids)}/{total}")
 
     if not task_ids:
-        return [fallback_url] * total
+        raise HTTPException(status_code=502, detail="图片生成任务提交失败")
 
     # Step 2: 等待 15s（文档建议 10-20s）
     await asyncio.sleep(15)
@@ -654,7 +653,7 @@ async def apimart_batch_generate(
                     if on_progress:
                         on_progress(idx, qr)
                 elif qr == "failed":
-                    results[idx] = None  # 标记为失败，最终用 fallback
+                    results[idx] = None  # 标记为失败
                     completed_this_round += 1
                     if on_progress:
                         on_progress(idx, None)
@@ -670,10 +669,7 @@ async def apimart_batch_generate(
 
         if fatal_error:
             print(f"  [FATAL] 致命错误，终止轮询: {fatal_error.detail}")
-            for i, r in enumerate(results):
-                if r is None and on_progress:
-                    on_progress(i, fallback_url)
-            return [r if r else fallback_url for r in results]
+            raise fatal_error
 
         # 本轮无进展计数
         if completed_this_round == 0:
@@ -691,11 +687,15 @@ async def apimart_batch_generate(
             break
         await asyncio.sleep(4)
 
-    # 未完成的用 fallback
-    final_results = [r if r else fallback_url for r in results]
+    # 统计成功数量，全部失败则报错
+    success_count = sum(1 for r in results if r is not None)
+    if success_count == 0:
+        raise HTTPException(status_code=502, detail="图片生成全部失败，请稍后重试")
+    final_results = [r if r else "" for r in results]
     for i, r in enumerate(results):
         if r is None and on_progress:
-            on_progress(i, fallback_url)
+            on_progress(i, None)
+            print(f"  [WARN] Image {i} generation failed")
     return final_results
 
 
@@ -1066,7 +1066,7 @@ async def generate_images(
             model_image_count=req.model_image_count,
         )
 
-        urls = await apimart_batch_generate(gen_result["tasks"], hosted_image_url)
+        urls = await apimart_batch_generate(gen_result["tasks"])
 
         split = _split_generation_urls(urls, req.model_image_count)
         main_images = split["main_images"]
@@ -1266,7 +1266,7 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
 
         # 批量生成
         urls = await apimart_batch_generate(
-            gen_result["tasks"], hosted_image_url, on_progress
+            gen_result["tasks"], on_progress
         )
 
         # 构建结果
