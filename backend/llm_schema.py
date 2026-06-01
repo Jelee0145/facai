@@ -15,7 +15,7 @@ class LLMSceneConfig(BaseModel):
 
 class LLMMetadata(BaseModel):
     titles: list[str] = Field(default_factory=list, description="3-5 条爆款标题，含 emoji 和本地化表达")
-    tags: list[str] = Field(default_factory=list, description="10-15 个标签，需包含目标市场当地语言")
+    tags: list[str] | str = Field(default_factory=list, description="10-15 个标签，需包含目标市场当地语言")
     description: str = Field(default="", description="商品描述文案")
     target_audience: str = Field(default="", description="目标人群描述")
     detail_focus: str = Field(default="", description="细节特写重点方向")

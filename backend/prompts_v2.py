@@ -781,6 +781,31 @@ def build_white_bg_prompt(product_type: str, category: dict) -> str:
 # 五、快速生成入口（兼容旧接口）
 # ============================================================
 
+def _normalize_tags(raw_tags) -> list[str]:
+    """将 LLM 可能返回的拼接标签拆分为独立标签"""
+    if isinstance(raw_tags, str):
+        candidates = [raw_tags]
+    elif isinstance(raw_tags, list):
+        candidates = [str(tag) for tag in raw_tags if tag is not None]
+    else:
+        return []
+
+    result = []
+    seen = set()
+    for tag in candidates:
+        parts = re.split(r'[\s,，、;；]+', tag.strip())
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            if not part.startswith('#'):
+                part = '#' + part
+            if part not in seen:
+                result.append(part)
+                seen.add(part)
+    return result
+
+
 def generate_all_tasks(
     product_type: str,
     image_url: str,
@@ -844,7 +869,7 @@ def generate_all_tasks(
         if md.get("titles"):
             meta_titles = md["titles"]
         if md.get("tags"):
-            meta_tags = md["tags"]
+            meta_tags = _normalize_tags(md["tags"])
         if md.get("description"):
             meta_desc = md["description"]
         if md.get("target_audience"):
@@ -901,7 +926,7 @@ def generate_all_tasks(
         "model_code": model_code,
         "model_profile": model_profile,
         "titles": meta_titles,
-        "tags": meta_tags,
+        "tags": _normalize_tags(meta_tags),
         "description": meta_desc,
         "target_audience": meta_audience,
     }
