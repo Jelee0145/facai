@@ -7,9 +7,9 @@ export function middleware(request: NextRequest) {
   const isDev = process.env.NODE_ENV === "development";
 
   const backendUrl = process.env.BACKEND_URL || "http://localhost:8001";
-  const connectSrc = isDev ? `'self' ${backendUrl}` : "'self'";
-  const scriptSrc = isDev ? "'self' 'unsafe-inline' 'unsafe-eval'" : "'self'";
-  const styleSrc = isDev ? "'self' 'unsafe-inline'" : "'self'";
+  const connectSrc = `'self' ${backendUrl}`;
+  const scriptSrc = "'self' 'unsafe-inline' 'unsafe-eval'";
+  const styleSrc = "'self' 'unsafe-inline'";
 
   const csp = [
     "default-src 'self'",
