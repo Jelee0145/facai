@@ -62,6 +62,11 @@ node-compile-cache/
 # AI Agent work logs
 .workbuddy/
 .playwright-mcp/
+.codex-remote-attachments/
+.codex-run/
+
+# Test files
+backend/test_*.py
 
 # Editor directories and files
 .vscode/*
