@@ -30,6 +30,7 @@ from prompts_v2 import (
     select_model,
     get_model_profile,
     generate_all_tasks,
+    _normalize_tags,
     build_comparison_prompt,
     build_detail_prompt,
     PromptValidationError,
@@ -515,6 +516,49 @@ async def _apimart_request(url: str, method: str = "POST", json_body: dict = Non
                 raise HTTPException(status_code=502, detail="上游 API 网络连接失败，请稍后重试")
 
 
+def _normalise_url_for_compare(url: str | None) -> str:
+    if not isinstance(url, str):
+        return ""
+    return url.strip()
+
+
+def _extract_result_urls(value) -> list[str]:
+    urls: list[str] = []
+
+    def collect(node):
+        if isinstance(node, str):
+            url = node.strip()
+            if url.startswith(("http://", "https://")):
+                urls.append(url)
+            return
+        if isinstance(node, list):
+            for item in node:
+                collect(item)
+            return
+        if isinstance(node, dict):
+            for item in node.values():
+                collect(item)
+
+    collect(value)
+    deduped: list[str] = []
+    seen = set()
+    for url in urls:
+        if url not in seen:
+            deduped.append(url)
+            seen.add(url)
+    return deduped
+
+
+def _select_generated_url(urls: list[str], reference_url: str | None = None) -> str | None:
+    reference = _normalise_url_for_compare(reference_url)
+    if reference:
+        for url in urls:
+            if _normalise_url_for_compare(url) != reference:
+                return url
+        return None
+    return urls[0] if urls else None
+
+
 async def apimart_upload_image(image_url: str) -> str:
     """将 base64 图片上传到 apimart，返回 hosted URL (72h 有效)。
     如果已经是 HTTP URL，直接返回。"""
@@ -574,7 +618,7 @@ async def apimart_generate(prompt: str, reference_url: str = None, size: str = "
 
     # 轮询
     for round_num in range(30):
-        qr = await _query_single_task(task_id)
+        qr = await _query_single_task(task_id, reference_url)
         if isinstance(qr, str) and qr != "failed":
             return qr
         if qr == "failed":
@@ -637,7 +681,10 @@ async def apimart_batch_generate(
 
         try:
             query_results = await asyncio.gather(
-                *[_query_single_task(tid) for tid in pending],
+                *[
+                    _query_single_task(tid, tasks[task_map[tid]].get("reference_url"))
+                    for tid in pending
+                ],
                 return_exceptions=True,
             )
 
@@ -721,7 +768,7 @@ async def _submit_task(task: dict, index: int, total: int) -> tuple[int, str]:
         raise
 
 
-async def _query_single_task(task_id: str):
+async def _query_single_task(task_id: str, reference_url: str | None = None):
     """查询单个任务状态。
     返回:
       str (URL) — completed，成功拿到图片
@@ -737,11 +784,15 @@ async def _query_single_task(task_id: str):
         status = data.get("status")
 
         if status == "completed":
-            try:
-                return data["result"]["images"][0]["url"][0]
-            except (KeyError, IndexError):
+            urls = _extract_result_urls(data.get("result", {}))
+            generated_url = _select_generated_url(urls, reference_url)
+            if generated_url:
+                return generated_url
+            if urls:
+                print(f"  [WARN] Task {task_id} completed but only returned the reference image")
+            else:
                 print(f"  [WARN] Task {task_id} completed but result format unexpected")
-                return "failed"
+            return "failed"
 
         if status in ("failed", "cancelled"):
             error_msg = data.get("error", {}).get("message", "未知错误")
@@ -792,6 +843,10 @@ def _split_generation_urls(urls: list[str], model_image_count: int) -> dict:
 
 
 # ========== API 端点 ==========
+
+def _response_tags(gen_result: dict, country_config: dict) -> list[str]:
+    return _normalize_tags(gen_result.get("tags") or country_config.get("hashtags", []))
+
 
 @app.get("/health")
 async def health():
@@ -1028,6 +1083,7 @@ async def generate_images(
             )
             model_profile = gen_result["model_profile"]
             model_styles = MODEL_STYLE_NAMES
+            tags = _response_tags(gen_result, country_config)
             tasks_detail = _build_tasks_detail(gen_result["tasks"], [url])
             add_history(task_id=task_id, api_key_id=None, user_id=user_id, product_type=sanitize_input(req.product_type, 50),
                         country=sanitize_input(req.country, 20), model=model_code, status="completed",
@@ -1037,7 +1093,7 @@ async def generate_images(
                         description_snapshot=sanitize_input(gen_result.get("description", req.product_type), 500),
                         preview_images_json=_preview_images([url]),
                         titles_json=json.dumps(gen_result.get("titles", []), ensure_ascii=False),
-                        tags_json=json.dumps(gen_result.get("tags", []), ensure_ascii=False),
+                        tags_json=json.dumps(tags, ensure_ascii=False),
                         target_audience=gen_result.get("target_audience", ""),
                         all_images_json=json.dumps([url], ensure_ascii=False))
             return {
@@ -1050,7 +1106,7 @@ async def generate_images(
                     "model": model_profile,
                     "country": gen_result["country_config"],
                     "titles": gen_result.get("titles", []),
-                    "tags": gen_result.get("tags", []),
+                    "tags": tags,
                     "description": gen_result.get("description", ""),
                     "targetAudience": gen_result.get("target_audience", ""),
                 },
@@ -1074,6 +1130,7 @@ async def generate_images(
         product_images = split["product_images"]
         detail_url = split["detail_image"]
         comparison_url = split["comparison_image"]
+        tags = _response_tags(gen_result, country_config)
 
         elapsed = time.time() - start
         success_count = sum(1 for u in urls if u and not u.startswith("data:"))
@@ -1086,7 +1143,7 @@ async def generate_images(
                     description_snapshot=sanitize_input(gen_result.get("description", req.product_type), 500),
                     preview_images_json=_preview_images(model_images),
                     titles_json=json.dumps(gen_result.get("titles", []), ensure_ascii=False),
-                    tags_json=json.dumps(gen_result.get("tags", []), ensure_ascii=False),
+                    tags_json=json.dumps(tags, ensure_ascii=False),
                     target_audience=gen_result.get("target_audience", ""),
                     all_images_json=json.dumps(main_images, ensure_ascii=False))
         print(f"[DONE] Completed! Elapsed {elapsed:.1f}s")
@@ -1129,7 +1186,7 @@ async def generate_images(
             ]),
             "description": gen_result.get("description", f"高品质{category['name']}，{category.get('detail_focus', '细节做工精良')}，适合{country_config['name']}市场"),
             "targetAudience": gen_result.get("target_audience", "18-35岁追求时尚的消费者"),
-            "tags": gen_result.get("tags", country_config["hashtags"]),
+            "tags": tags,
         },
     }
     except HTTPException as e:
@@ -1276,6 +1333,7 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
         product_images = split["product_images"]
         detail_url = split["detail_image"]
         comparison_url = split["comparison_image"]
+        tags = _response_tags(gen_result, country_config)
 
         model_profile = get_model_profile(model_code)
 
@@ -1296,7 +1354,7 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
                 "titles": gen_result.get("titles", [f"{req.product_type} - {country_config['name']}爆款", "网红同款推荐", "限时热卖"]),
                 "description": gen_result.get("description", f"高品质{category['name']}，适合{country_config['name']}市场"),
                 "targetAudience": gen_result.get("target_audience", "18-35岁追求时尚的消费者"),
-                "tags": gen_result.get("tags", country_config["hashtags"]),
+                "tags": tags,
             },
         }
         progress["status"] = "completed"
@@ -1327,7 +1385,7 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
             description_snapshot=sanitize_input(gen_result.get("description", req.product_type), 500),
             preview_images_json=_preview_images(model_images),
             titles_json=json.dumps(gen_result.get("titles", []), ensure_ascii=False),
-            tags_json=json.dumps(gen_result.get("tags", []), ensure_ascii=False),
+            tags_json=json.dumps(tags, ensure_ascii=False),
             target_audience=gen_result.get("target_audience", ""),
             all_images_json=json.dumps(main_images, ensure_ascii=False),
         )

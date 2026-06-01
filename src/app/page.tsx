@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Progress } from "@/components/ui/progress";
 import { ErrorBoundary } from "@/components/ui/error-boundary";
 import { toast } from "@/components/ui/toast";
 import { fetchWithRetry } from "@/lib/fetch";
@@ -12,6 +11,36 @@ import { logger } from "@/lib/logger";
 import { Modal } from "@/components/ui/modal";
 
 const proxyImg = (url: string) => `/api/proxy-image?url=${encodeURIComponent(url)}`;
+
+const isNonEmptyImageUrl = (value: unknown): value is string =>
+  typeof value === "string" && value.trim().length > 0;
+
+const normalizeImageSlots = (value: unknown): string[] =>
+  Array.isArray(value) ? value.map((item) => (isNonEmptyImageUrl(item) ? item : "")) : [];
+
+const normalizeImageUrls = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter(isNonEmptyImageUrl) : [];
+
+const normalizeTags = (value: unknown): string[] => {
+  const candidates = typeof value === "string" ? [value] : Array.isArray(value) ? value : [];
+  const seen = new Set<string>();
+  const tags: string[] = [];
+
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") continue;
+    for (const rawPart of candidate.split(/[\s,，、;；]+/)) {
+      const part = rawPart.trim();
+      if (!part) continue;
+      const tag = part.startsWith("#") ? part : `#${part.replace(/^#+/, "")}`;
+      if (!seen.has(tag)) {
+        seen.add(tag);
+        tags.push(tag);
+      }
+    }
+  }
+
+  return tags;
+};
 
 interface UserProfile {
   id: number;
@@ -339,20 +368,26 @@ export default function HomePage() {
       const result = d.result as Record<string, unknown> | undefined;
       const r = result?.data as Record<string, unknown> | undefined;
       if (r) {
-        if (Array.isArray(r.mainImages)) {
-          setGeneratedImages(r.mainImages as string[]);
-        } else if (Array.isArray(r.modelImages)) {
-          setGeneratedImages(r.modelImages as string[]);
+        const mainImages = normalizeImageSlots(r.mainImages);
+        const modelImages = normalizeImageUrls(r.modelImages);
+        const productImages = normalizeImageUrls(r.productImages);
+        if (mainImages.some(isNonEmptyImageUrl)) {
+          setGeneratedImages(mainImages);
+        } else if (modelImages.length > 0) {
+          setGeneratedImages(modelImages);
+        } else {
+          setGeneratedImages([]);
+          toast.error("生成完成，但没有返回可展示的生成图");
         }
-        if (Array.isArray(r.productImages)) setGeneratedProductImages(r.productImages as string[]);
+        setGeneratedProductImages(productImages);
         if (typeof r.modelImageCount === "number") setGeneratedModelImageCount(r.modelImageCount);
-        else if (Array.isArray(r.modelImages)) setGeneratedModelImageCount(r.modelImages.length);
+        else if (modelImages.length > 0) setGeneratedModelImageCount(modelImages.length);
         if (Array.isArray(r.titles)) setGeneratedTitles(r.titles as string[]);
-        if (Array.isArray(r.tags)) setGeneratedTags(r.tags as string[]);
+        setGeneratedTags(normalizeTags(r.tags));
         if (typeof r.targetAudience === "string") setApplicableCrowd(r.targetAudience);
         setShowTrending(true);
-        if (typeof r.comparisonImage === "string") setComparisonImage(r.comparisonImage);
-        if (typeof r.detailImage === "string") setDetailImage(r.detailImage);
+        if (isNonEmptyImageUrl(r.comparisonImage)) setComparisonImage(r.comparisonImage);
+        if (isNonEmptyImageUrl(r.detailImage)) setDetailImage(r.detailImage);
       }
       setGenerationStatus("completed");
       setSimulatedProgressActive(false);
@@ -646,11 +681,12 @@ export default function HomePage() {
       });
 
       const data = await res.json();
-      if (res.ok && data.success && data.data?.modelImages?.length > 0) {
-        setTestImage(data.data.modelImages[0]);
+      const testImages = normalizeImageUrls(data.data?.modelImages);
+      if (res.ok && data.success && testImages.length > 0) {
+        setTestImage(testImages[0]);
         setTestStyleName(data.data.modelStyles?.[0] || "测试风格");
         if (data.data.titles) setTestTitles(data.data.titles);
-        if (data.data.tags) setTestTags(data.data.tags);
+        setTestTags(normalizeTags(data.data.tags));
         refreshWallet().catch((e) => logger.error("Failed to refresh wallet:", e));
       } else {
         toast.error("测试生成失败: " + (data.detail || data.error || "未知错误"));
@@ -703,10 +739,11 @@ export default function HomePage() {
       });
 
       const data = await res.json();
-      if (res.ok && data.success && data.data?.modelImages?.length > 0) {
+      const retryImages = normalizeImageUrls(data.data?.modelImages);
+      if (res.ok && data.success && retryImages.length > 0) {
         setGeneratedImages((prev) => {
           const next = [...prev];
-          next[styleIndex] = data.data.modelImages[0];
+          next[styleIndex] = retryImages[0];
           return next;
         });
         refreshWallet().catch((e) => logger.error("Failed to refresh wallet:", e));
@@ -1135,7 +1172,15 @@ export default function HomePage() {
               </div>
               <div className="flex flex-wrap gap-1.5">
                 {testTags.map((t, i) => (
-                  <span key={i} className="px-2.5 py-1 bg-pink-600/40 text-white/90 text-xs rounded-full">{t}</span>
+                  <button
+                    key={i}
+                    onClick={() => copyToClipboard(t, i + 100)}
+                    className={`px-2.5 py-1 text-white/90 text-xs rounded-full transition-all ${
+                      copiedTitleIndex === i + 100 ? "bg-green-500/80" : "bg-pink-600/40 hover:bg-pink-500/60"
+                    }`}
+                  >
+                    {t}
+                  </button>
                 ))}
               </div>
             </div>
@@ -1237,7 +1282,7 @@ export default function HomePage() {
         </section>
 
         {/* 生成结果 */}
-        {generatedImages.length > 0 && (
+        {generatedImages.some(isNonEmptyImageUrl) && (
           <section className="mb-8">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-xl font-bold text-white flex items-center gap-2">
@@ -1249,11 +1294,12 @@ export default function HomePage() {
             </div>
             <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-3">
               {generatedImages.map((imgUrl, index) => (
-                <div
-                  key={index}
-                  className="bg-white/10 rounded-lg overflow-hidden group relative cursor-pointer"
-                  onClick={() => setLightboxUrl(imgUrl)}
-                >
+                isNonEmptyImageUrl(imgUrl) ? (
+                  <div
+                    key={index}
+                    className="bg-white/10 rounded-lg overflow-hidden group relative cursor-pointer"
+                    onClick={() => setLightboxUrl(imgUrl)}
+                  >
                   <img
                     src={proxyImg(imgUrl)}
                     alt={`生成的图片 ${index + 1}`}
@@ -1288,7 +1334,8 @@ export default function HomePage() {
                       🔄
                     </button>
                   </div>
-                </div>
+                  </div>
+                ) : null
               ))}
             </div>
 

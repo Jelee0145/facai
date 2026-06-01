@@ -64,6 +64,7 @@ node-compile-cache/
 .playwright-mcp/
 .codex-remote-attachments/
 .codex-run/
+.claude/settings.local.json
 
 # Test files
 backend/test_*.py
@@ -120,4 +121,3 @@ backend/.venv/
 # Misc
 .vercel
 .turbo
-
