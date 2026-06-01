@@ -344,6 +344,7 @@ class GenerateRequest(BaseModel):
     style_index: int = Field(default=0, ge=0, le=10)
     prompt_size: str = Field(default="auto", pattern=r"^(auto|1:1|4:3|3:4|16:9|9:16)$")
     prompt_resolution: str = Field(default="1k", pattern=r"^(1k|2k|4k)$")
+    model_image_count: int = Field(default=4, ge=0, le=9)
 
 
 class LoginRequest(BaseModel):
@@ -386,10 +387,14 @@ class CreateApiKeyRequest(BaseModel):
 task_store: dict[str, dict] = {}
 _active_tasks: set[str] = set()  # Track running background tasks
 
+MAIN_IMAGE_COUNT = 9
+AUX_IMAGE_COUNT = 2
+TOTAL_GENERATION_IMAGES = MAIN_IMAGE_COUNT + AUX_IMAGE_COUNT
+
 IMAGE_NAMES = [
-    "模特图1", "模特图2", "模特图3", "模特图4", "模特图5",
-    "模特图6", "模特图7", "模特图8", "模特图9", "模特图10", "模特图11",
-    "白底展示图", "竞品对比图", "细节放大图",
+    "主图1", "主图2", "主图3", "主图4", "主图5",
+    "主图6", "主图7", "主图8", "主图9",
+    "局部放大图", "白底对比图",
 ]
 
 
@@ -730,11 +735,27 @@ def _build_tasks_detail(tasks: list[dict], urls: list[str] | None = None) -> str
             "index": i,
             "prompt": task.get("prompt", ""),
             "reference_url": task.get("reference_url", ""),
+            "kind": task.get("kind", ""),
         }
         if urls and i < len(urls):
             entry["result_url"] = urls[i]
         detail.append(entry)
     return json.dumps(detail, ensure_ascii=False)
+
+
+def _split_generation_urls(urls: list[str], model_image_count: int) -> dict:
+    main_images = urls[:MAIN_IMAGE_COUNT]
+    model_count = max(0, min(MAIN_IMAGE_COUNT, int(model_image_count)))
+    detail_image = urls[MAIN_IMAGE_COUNT] if len(urls) > MAIN_IMAGE_COUNT else None
+    comparison_image = urls[MAIN_IMAGE_COUNT + 1] if len(urls) > MAIN_IMAGE_COUNT + 1 else None
+    return {
+        "main_images": main_images,
+        "model_images": main_images[:model_count],
+        "product_images": main_images[model_count:],
+        "detail_image": detail_image,
+        "comparison_image": comparison_image,
+        "model_image_count": model_count,
+    }
 
 
 # ========== API 端点 ==========
@@ -899,7 +920,7 @@ async def generate_images(
         if get_config("llm_api_key"):
             try:
                 llm_messages = build_llm_messages(
-                    image_url=str(req.image_url) if req.image_url else None,
+                    image_url=hosted_image_url if hosted_image_url else None,
                     product_type=req.product_type,
                     country_name=country_config["name"],
                     platform=country_config["platform"],
@@ -910,7 +931,7 @@ async def generate_images(
                 )
                 llm_request_data = json.dumps(llm_messages, ensure_ascii=False)
                 llm_config = await llm_analyze(
-                    image_url=str(req.image_url) if req.image_url else None,
+                    image_url=hosted_image_url if hosted_image_url else None,
                     product_type=req.product_type,
                     country_name=country_config["name"],
                     platform=country_config["platform"],
@@ -957,6 +978,7 @@ async def generate_images(
                 category=category, country_config=country_config,
                 model_code=model_code, model_profile=model_profile,
                 llm_config=llm_config,
+                model_image_count=req.model_image_count,
             )
             url = await apimart_generate(
                 gen_result["tasks"][idx]["prompt"],
@@ -996,20 +1018,23 @@ async def generate_images(
             category=category, country_config=country_config,
             model_code=model_code, model_profile=model_profile,
             llm_config=llm_config,
+            model_image_count=req.model_image_count,
         )
 
         urls = await apimart_batch_generate(gen_result["tasks"], hosted_image_url)
 
-        model_images = urls[:11]
-        white_bg_url = urls[11]
-        comparison_url = urls[12]
-        detail_url = urls[13]
+        split = _split_generation_urls(urls, req.model_image_count)
+        main_images = split["main_images"]
+        model_images = split["model_images"]
+        product_images = split["product_images"]
+        detail_url = split["detail_image"]
+        comparison_url = split["comparison_image"]
 
         elapsed = time.time() - start
         success_count = sum(1 for u in urls if u and not u.startswith("data:"))
         tasks_detail = _build_tasks_detail(gen_result["tasks"], urls)
         add_history(task_id=task_id, api_key_id=None, user_id=user_id, product_type=sanitize_input(req.product_type, 50),
-                    country=sanitize_input(req.country, 20), model=model_code, total_images=14,
+                    country=sanitize_input(req.country, 20), model=model_code, total_images=TOTAL_GENERATION_IMAGES,
                     success_count=success_count, status="completed", elapsed_seconds=round(elapsed, 1),
                     llm_request=llm_request_data, llm_response=llm_response_data,
                     tasks_detail=tasks_detail, charge_points=charge_points,
@@ -1021,9 +1046,11 @@ async def generate_images(
             "success": True,
             "data": {
             "originalImage": hosted_image_url,
+            "mainImages": main_images,
             "modelImages": model_images,
+            "productImages": product_images,
+            "modelImageCount": split["model_image_count"],
             "modelStyles": MODEL_STYLE_NAMES,
-            "displayImage": white_bg_url,
             "comparisonImage": comparison_url,
             "detailImage": detail_url,
             # 品类信息
@@ -1121,7 +1148,7 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
         if get_config("llm_api_key"):
             try:
                 llm_messages = build_llm_messages(
-                    image_url=str(req.image_url) if req.image_url else None,
+                    image_url=hosted_image_url if hosted_image_url else None,
                     product_type=req.product_type,
                     country_name=country_config["name"],
                     platform=country_config["platform"],
@@ -1132,7 +1159,7 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
                 )
                 llm_request_data = json.dumps(llm_messages, ensure_ascii=False)
                 llm_config = await llm_analyze(
-                    image_url=str(req.image_url) if req.image_url else None,
+                    image_url=hosted_image_url if hosted_image_url else None,
                     product_type=req.product_type,
                     country_name=country_config["name"],
                     platform=country_config["platform"],
@@ -1157,6 +1184,7 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
             model_code=model_code,
             model_profile=model_profile,
             llm_config=llm_config,
+            model_image_count=req.model_image_count,
         )
 
         def on_progress(index: int, url: Optional[str]):
@@ -1193,10 +1221,12 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
         )
 
         # 构建结果
-        model_images = urls[:11]
-        white_bg_url = urls[11]
-        comparison_url = urls[12]
-        detail_url = urls[13]
+        split = _split_generation_urls(urls, req.model_image_count)
+        main_images = split["main_images"]
+        model_images = split["model_images"]
+        product_images = split["product_images"]
+        detail_url = split["detail_image"]
+        comparison_url = split["comparison_image"]
 
         model_profile = get_model_profile(model_code)
 
@@ -1204,9 +1234,11 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
             "success": True,
             "data": {
                 "originalImage": hosted_image_url,
+                "mainImages": main_images,
                 "modelImages": model_images,
+                "productImages": product_images,
+                "modelImageCount": split["model_image_count"],
                 "modelStyles": MODEL_STYLE_NAMES,
-                "displayImage": white_bg_url,
                 "comparisonImage": comparison_url,
                 "detailImage": detail_url,
                 "category": {"name": category["name"], "parent": category["parent"], "shotType": category["shot_type"]},
@@ -1235,7 +1267,7 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
             model=model_code,
             prompt_size=req.prompt_size,
             prompt_resolution=req.prompt_resolution,
-            total_images=14,
+            total_images=TOTAL_GENERATION_IMAGES,
             success_count=progress["completed"],
             status="completed",
             elapsed_seconds=round(time.time() - progress["start_time"], 1),
@@ -1287,7 +1319,7 @@ async def generate_async(
     validate_image_data(str(req.image_url))
     ensure_api_key_available()
     client_ip = request.client.host if request.client else "unknown"
-    task_id = init_progress(14, creator_ip=client_ip)
+    task_id = init_progress(TOTAL_GENERATION_IMAGES, creator_ip=client_ip)
     user_id = int(user["id"])
     charge_points = get_generation_cost_points()
     try:
@@ -1302,7 +1334,12 @@ async def generate_async(
     task = asyncio.create_task(_run_generation_background(task_id, req, user_id, charge_points))
     task.add_done_callback(lambda t: _cleanup_active_task(task_id, t))
     print(f"[START] Background task created: {task_id} (IP: {client_ip})")
-    return {"task_id": task_id, "charge_points": charge_points}
+    return {
+        "task_id": task_id,
+        "charge_points": charge_points,
+        "total_images": TOTAL_GENERATION_IMAGES,
+        "model_image_count": req.model_image_count,
+    }
 
 
 @app.get("/api/generate/status/{task_id}")
@@ -1492,7 +1529,6 @@ async def create_api_key(request: Request, req: CreateApiKeyRequest, user: dict 
 @limiter.limit("10/minute")
 async def modify_api_key(request: Request, key_id: int, req: dict, user: dict = Depends(authenticate), _csrf=Depends(verify_csrf)):
     """更新 API Key"""
-    logger.info(f"[BALANCE] PUT /admin/api-keys/{key_id} - body: {req}")
     kwargs = {}
     if "name" in req:
         kwargs["name"] = sanitize_input(req["name"], 100)
@@ -1501,13 +1537,14 @@ async def modify_api_key(request: Request, key_id: int, req: dict, user: dict = 
     if "daily_limit" in req:
         kwargs["daily_limit"] = int(req["daily_limit"])
     if "balance_usd" in req:
-        balance = float(req["balance_usd"])
+        try:
+            balance = float(req["balance_usd"])
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=422, detail="balance_usd must be a number")
         if balance < 0:
             raise HTTPException(status_code=400, detail="balance_usd must be >= 0")
         kwargs["balance_usd"] = balance
-    logger.info(f"[BALANCE] kwargs to update: {kwargs}")
     ok = db_update_key(key_id, **kwargs)
-    logger.info(f"[BALANCE] db_update_key returned: {ok}")
     if not ok:
         raise HTTPException(status_code=404, detail="Key 不存在")
     return {"message": "更新成功"}
@@ -1612,7 +1649,10 @@ async def admin_update_generation_cost(
     user: dict = Depends(authenticate),
     _csrf=Depends(verify_csrf),
 ):
-    points = int(req.get("points", 10))
+    try:
+        points = int(req.get("points", 10))
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail="points must be an integer")
     if points < 1:
         raise HTTPException(status_code=400, detail="扣费积分必须大于 0")
     set_config("generation_cost_points", str(points))

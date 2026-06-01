@@ -116,6 +116,9 @@ const COUNTRIES = [
   { code: "usa", name: "美国", flag: "🇺🇸", currency: "USD", shopUrl: "https://seller.tiktok.com/", platform: "TikTok Shop USA" },
 ];
 
+const MAIN_IMAGE_COUNT = 9;
+const TOTAL_GENERATION_IMAGES = 11;
+
 // 预定义商品类型 - 全品类
 const PRODUCT_TYPES = [
   // 服装类
@@ -170,6 +173,7 @@ export default function HomePage() {
   const [selectedModel, setSelectedModel] = useState<string>("general");
   const [selectedProduct, setSelectedProduct] = useState<string>("top");
   const [description, setDescription] = useState<string>("");
+  const [modelImageCount, setModelImageCount] = useState<number>(4);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [selectedCategory, setSelectedCategory] = useState<string>("服装");
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
@@ -205,6 +209,8 @@ export default function HomePage() {
 
   // 生成结果
   const [generatedImages, setGeneratedImages] = useState<string[]>([]);
+  const [generatedProductImages, setGeneratedProductImages] = useState<string[]>([]);
+  const [generatedModelImageCount, setGeneratedModelImageCount] = useState<number>(4);
 
   // 对比图和细节图
   const [comparisonImage, setComparisonImage] = useState<string | null>(null);
@@ -223,7 +229,7 @@ export default function HomePage() {
   // 进度追踪
   const [progressPercent, setProgressPercent] = useState(0);
   const [completedCount, setCompletedCount] = useState(0);
-  const [totalCount, setTotalCount] = useState(14);
+  const [totalCount, setTotalCount] = useState(TOTAL_GENERATION_IMAGES);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [generationStatus, setGenerationStatus] = useState<string>("idle");
   const [latestImage, setLatestImage] = useState<string | null>(null);
@@ -284,7 +290,7 @@ export default function HomePage() {
     onProgress: (data: unknown) => {
       const d = data as Record<string, unknown>;
       const completed = typeof d.completed === "number" ? d.completed : 0;
-      const total = typeof d.total === "number" ? d.total : 14;
+      const total = typeof d.total === "number" ? d.total : TOTAL_GENERATION_IMAGES;
       setCompletedCount(completed);
       setProgressPercent(Math.round((completed / total) * 100));
       const images = Array.isArray(d.images) ? d.images as Array<Record<string, unknown>> : null;
@@ -302,7 +308,14 @@ export default function HomePage() {
       const result = d.result as Record<string, unknown> | undefined;
       const r = result?.data as Record<string, unknown> | undefined;
       if (r) {
-        if (Array.isArray(r.modelImages)) setGeneratedImages(r.modelImages as string[]);
+        if (Array.isArray(r.mainImages)) {
+          setGeneratedImages(r.mainImages as string[]);
+        } else if (Array.isArray(r.modelImages)) {
+          setGeneratedImages(r.modelImages as string[]);
+        }
+        if (Array.isArray(r.productImages)) setGeneratedProductImages(r.productImages as string[]);
+        if (typeof r.modelImageCount === "number") setGeneratedModelImageCount(r.modelImageCount);
+        else if (Array.isArray(r.modelImages)) setGeneratedModelImageCount(r.modelImages.length);
         if (Array.isArray(r.titles)) setGeneratedTitles(r.titles as string[]);
         if (Array.isArray(r.tags)) setGeneratedTags(r.tags as string[]);
         if (typeof r.targetAudience === "string") setApplicableCrowd(r.targetAudience);
@@ -329,6 +342,8 @@ export default function HomePage() {
   );
 
   const currentCountry = COUNTRIES.find((c) => c.code === selectedCountry);
+  const productImageCount = MAIN_IMAGE_COUNT - modelImageCount;
+  const sliderProgress = (modelImageCount / MAIN_IMAGE_COUNT) * 100;
 
   const refreshWallet = async () => {
     const res = await fetch("/api/user/wallet");
@@ -355,7 +370,14 @@ export default function HomePage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(String(data.detail || "登录失败"));
+        const detail = data.detail;
+        let msg = "登录失败";
+        if (Array.isArray(detail)) {
+          msg = detail.map((e: Record<string, unknown>) => e.msg || JSON.stringify(e)).join("; ");
+        } else if (typeof detail === "string") {
+          msg = detail;
+        }
+        toast.error(msg);
         return;
       }
       setUser(data.user);
@@ -489,6 +511,8 @@ export default function HomePage() {
 
     // 清空旧结果并初始化进度
     setGeneratedImages([]);
+    setGeneratedProductImages([]);
+    setGeneratedModelImageCount(modelImageCount);
     setGeneratedTitles([]);
     setGeneratedTags([]);
     setComparisonImage(null);
@@ -499,7 +523,7 @@ export default function HomePage() {
     setTestTags([]);
     setProgressPercent(0);
     setCompletedCount(0);
-    setTotalCount(14);
+    setTotalCount(TOTAL_GENERATION_IMAGES);
     setElapsedSeconds(0);
     setLatestImage(null);
     setGenerationStatus("submitting");
@@ -515,6 +539,7 @@ export default function HomePage() {
           product_type: getEffectiveProductType(),
           country: selectedCountry,
           model: selectedModel,
+          model_image_count: modelImageCount,
         }),
       });
 
@@ -566,6 +591,7 @@ export default function HomePage() {
           product_type: getEffectiveProductType(),
           country: selectedCountry,
           model: selectedModel,
+          model_image_count: modelImageCount,
           generate_type: "test",
         }),
       });
@@ -620,6 +646,7 @@ export default function HomePage() {
           product_type: getEffectiveProductType(),
           country: selectedCountry,
           model: selectedModel,
+          model_image_count: generatedModelImageCount,
           generate_type: "test",
           style_index: styleIndex,
         }),
@@ -647,7 +674,7 @@ export default function HomePage() {
 
   const handleAddCustomType = async () => {
     if (!newCustomTypeName.trim()) {
-      alert("请输入自定义类型名称");
+      toast.warning("请输入自定义类型名称");
       return;
     }
 
@@ -677,7 +704,7 @@ export default function HomePage() {
       setSelectedProduct(newType.code);
     } catch (e) {
       logger.error("添加自定义类型失败:", e);
-      alert("添加失败，请检查后端服务是否运行");
+      toast.error("添加失败，请检查后端服务是否运行");
       return;
     }
 
@@ -689,6 +716,7 @@ export default function HomePage() {
   const handleDeleteCustomType = async (code: string) => {
     const idMatch = code.match(/^db_(\d+)$/);
     if (!idMatch) return;
+    if (!confirm("确定删除此自定义类型？")) return;
 
     try {
       const res = await fetchWithRetry(`/api/custom-types?id=${idMatch[1]}`, { method: "DELETE" });
@@ -819,12 +847,7 @@ export default function HomePage() {
                 </button>
               )}
               <span className="text-sm text-purple-300">九国市场</span>
-              <a
-                href={currentCountry?.shopUrl || "https://seller.tiktok.com/"}
-                className="px-4 py-2 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-lg font-medium hover:opacity-90 transition-opacity"
-              >
-                前往卖家后台
-              </a>
+
             </div>
           </div>
         </div>
@@ -1068,6 +1091,38 @@ export default function HomePage() {
           )}
         </section>
 
+        {/* 模特图数量 */}
+        <section className="mb-6">
+          <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4 sm:flex-row sm:items-center">
+            <div className="min-w-32">
+              <div className="text-sm font-medium text-white">模特图数量</div>
+              <div className="text-xs text-white/55">9张主图内分配</div>
+            </div>
+            <div className="flex flex-1 items-center gap-4">
+              <input
+                type="range"
+                min={0}
+                max={MAIN_IMAGE_COUNT}
+                step={1}
+                value={modelImageCount}
+                disabled={isLoading}
+                onChange={(e) => setModelImageCount(Number(e.target.value))}
+                aria-label="选择模特图数量"
+                className="h-4 min-w-0 flex-1 cursor-pointer appearance-none rounded-full border border-white/35 outline-none transition disabled:cursor-not-allowed disabled:opacity-60 [&::-moz-range-thumb]:h-6 [&::-moz-range-thumb]:w-6 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-2 [&::-moz-range-thumb]:border-white [&::-moz-range-thumb]:bg-blue-500 [&::-webkit-slider-thumb]:h-6 [&::-webkit-slider-thumb]:w-6 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-white [&::-webkit-slider-thumb]:bg-blue-500"
+                style={{
+                  background: `linear-gradient(to right, #2563eb 0%, #2563eb ${sliderProgress}%, #050505 ${sliderProgress}%, #050505 100%)`,
+                }}
+              />
+              <div className="w-32 shrink-0 rounded-lg bg-blue-500 px-3 py-2 text-center text-sm font-semibold text-white">
+                已选 {modelImageCount} 张
+              </div>
+            </div>
+            <div className="text-xs text-white/55 sm:w-28 sm:text-right">
+              商品图 {productImageCount} 张
+            </div>
+          </div>
+        </section>
+
         {/* 一键生成按钮 */}
         <section className="mb-8">
           <button
@@ -1118,11 +1173,11 @@ export default function HomePage() {
                 )}
               </div>
             ) : (
-              "🚀 一键生成：11张图 + 爆款标题 + 热门标签"
+              `🚀 一键生成：9张主图 + 2张辅助图`
             )}
           </button>
           <p className="text-center text-white/60 text-sm mt-3">
-            系统将根据商品类型自动匹配风格和拍摄角度，生成多样化电商主图
+            当前将生成 {modelImageCount} 张模特图、{productImageCount} 张商品图，并附带局部放大图和白底对比图
           </p>
         </section>
 
@@ -1131,9 +1186,11 @@ export default function HomePage() {
           <section className="mb-8">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-xl font-bold text-white flex items-center gap-2">
-                <span>✨</span> 生成的图片（含模特展示）
+                <span>✨</span> 生成的主图
               </h2>
-              <span className="text-white/50 text-sm">{generatedImages.length} 张</span>
+              <span className="text-white/50 text-sm">
+                模特图 {generatedModelImageCount} 张 / 商品图 {generatedProductImages.length} 张
+              </span>
             </div>
             <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-3">
               {generatedImages.map((imgUrl, index) => (
@@ -1151,7 +1208,9 @@ export default function HomePage() {
                   />
                   {/* 风格编号 */}
                   <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-1.5">
-                    <span className="text-white text-[10px] leading-none">风格 {index + 1}</span>
+                    <span className="text-white text-[10px] leading-none">
+                      {index < generatedModelImageCount ? `模特图 ${index + 1}` : `商品图 ${index - generatedModelImageCount + 1}`}
+                    </span>
                   </div>
                   {/* 复制按钮 */}
                   <div className="absolute top-1 right-1 z-10 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -1445,11 +1504,40 @@ export default function HomePage() {
             placeholder="密码"
             value={authForm.password}
             onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })}
-            className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-white/50 focus:outline-none focus:border-purple-500"
+            className={`w-full px-4 py-3 bg-white/10 border rounded-lg text-white placeholder-white/50 focus:outline-none focus:border-purple-500 ${
+              authMode === "register" && authForm.password.length > 0 && !(
+                authForm.password.length >= 12 &&
+                /[a-z]/.test(authForm.password) &&
+                /[A-Z]/.test(authForm.password) &&
+                /[0-9]/.test(authForm.password) &&
+                /[^a-zA-Z0-9]/.test(authForm.password)
+              )
+                ? "border-red-500"
+                : "border-white/20"
+            }`}
             required
-            minLength={6}
-            maxLength={100}
+            minLength={authMode === "register" ? 12 : 6}
+            maxLength={128}
           />
+          {authMode === "register" && authForm.password.length > 0 && (() => {
+            const pw = authForm.password;
+            const rules = [
+              { ok: pw.length >= 12, text: "至少12位" },
+              { ok: /[a-z]/.test(pw), text: "包含小写字母" },
+              { ok: /[A-Z]/.test(pw), text: "包含大写字母" },
+              { ok: /[0-9]/.test(pw), text: "包含数字" },
+              { ok: /[^a-zA-Z0-9]/.test(pw), text: "包含特殊字符" },
+            ];
+            return (
+              <ul className="space-y-0.5">
+                {rules.map((r) => (
+                  <li key={r.text} className={`text-xs ${r.ok ? "text-green-400" : "text-red-400"}`}>
+                    {r.ok ? "✓" : "✗"} {r.text}
+                  </li>
+                ))}
+              </ul>
+            );
+          })()}
           {authMode === "register" && (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <input
@@ -1612,6 +1700,7 @@ export default function HomePage() {
         <div className="max-w-7xl mx-auto px-4 text-center text-white/60">
           <p>发财计划 - 让跨境电商更简单</p>
           <p className="text-sm mt-2">支持泰国、越南、马来西亚、菲律宾、印尼、日本、韩国、美国、中国九大市场</p>
+          <p className="text-sm mt-2">联系管理员/问题反馈：邱忠祥 13543825114</p>
         </div>
       </footer>
     </div>

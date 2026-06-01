@@ -59,13 +59,21 @@ export default function KeysPage() {
   };
 
   const toggleKey = async (id: number, isActive: boolean) => {
-    await fetchWithAuth(`/api/admin/api-keys/${id}`, { method: "PUT", body: JSON.stringify({ is_active: isActive ? 0 : 1 }) });
+    const r = await fetchWithAuth(`/api/admin/api-keys/${id}`, { method: "PUT", body: JSON.stringify({ is_active: isActive ? 0 : 1 }) });
+    if (!r.ok) {
+      toast.error("Key 状态更新失败");
+      return;
+    }
     load();
   };
 
   const deleteKey = async (id: number) => {
     if (!confirm("确定删除此 Key？")) return;
-    await fetchWithAuth(`/api/admin/api-keys/${id}`, { method: "DELETE" });
+    const r = await fetchWithAuth(`/api/admin/api-keys/${id}`, { method: "DELETE" });
+    if (!r.ok) {
+      toast.error("Key 删除失败");
+      return;
+    }
     load();
   };
 

@@ -653,6 +653,7 @@ def build_fashion_prompt(
     pose_pool_override: list | None = None,
     style_keywords_override: str = "",
     composition_override: str = "",
+    shot_type_override: str | None = None,
 ) -> dict:
     product_type = sanitize_prompt_input(product_type)
     """
@@ -662,10 +663,12 @@ def build_fashion_prompt(
     """
     country_cfg = COUNTRY_CONFIG.get(country, COUNTRY_CONFIG["usa"])
     model_profile = get_model_profile(model_code)
+    shot_type = shot_type_override or category.get("shot_type", "product")
 
     # 品类专属的拍摄方式
-    shot_type = category.get("shot_type", "product")
     composition_guide = composition_override or category.get("composition", "专业商品展示")
+    if shot_type == "product":
+        composition_guide = "product-only commercial image, no human model, clear product focus"
 
     # 场景选择
     scene_pool = scene_pool_override or category.get("scene_pool", ["专业产品摄影场景"])
@@ -681,6 +684,8 @@ def build_fashion_prompt(
 MODEL: {country_cfg['model_desc']}
 POSE: {pose}
 STYLING: {country_cfg['style_preference']}{style_extra}"""
+
+    product_negative = "\n- NO human model, NO person, NO body parts, NO hands holding or wearing the product" if shot_type == "product" else ""
 
     # 组装 prompt
     prompt = f"""PROFESSIONAL E-COMMERCE PRODUCT PHOTOGRAPHY - {country_cfg['platform']} LISTING
@@ -718,7 +723,7 @@ NEGATIVE CONSTRAINTS - ABSOLUTELY DO NOT INCLUDE:
 - NO low resolution, blur, noise, or compression artifacts
 - NO inappropriate, unsafe, or non-commercial content
 - NO borders, frames, collages, or composite layouts
-- NO text characters in any language on the image"""
+- NO text characters in any language on the image{product_negative}"""
 
     return {
         "prompt": prompt,
@@ -751,6 +756,26 @@ VISUAL SEPARATOR: Subtle gradient divider between left (bad) and right (good).
 
 8K ULTRA REALISTIC. COMMERCIAL READY for TikTok Shop.
 NO TEXT. NO WATERMARKS. NO LABELS."""
+
+
+def build_white_comparison_prompt(product_type: str, category: dict) -> str:
+    """白底图 + 对比图合成 prompt"""
+    product_type = sanitize_prompt_input(product_type)
+    return f"""E-COMMERCE PRODUCT LISTING COMPOSITE PHOTOGRAPHY
+
+SUBJECT: {product_type} ({category['name']})
+
+CREATE ONE CLEAN COMPOSITE IMAGE WITH TWO CLEAR PRODUCT PRESENTATIONS:
+LEFT SIDE: premium product on a pure seamless white background, centered, high-key studio lighting.
+RIGHT SIDE: upgraded marketplace presentation of the same product with richer lighting, better angle, and more premium commercial styling.
+
+REQUIREMENTS:
+- Same product identity, color, material, and design as the reference image
+- Product-only presentation, no human model, no person, no hands
+- Clean comparison layout with no text, labels, arrows, watermarks, logos, QR codes, or borders
+- Professional TikTok Shop listing quality, crisp product detail, realistic lighting
+
+8K ULTRA REALISTIC. COMMERCIAL READY."""
 
 
 def build_detail_prompt(product_type: str, category: dict, detail_focus_override: str | None = None) -> str:
@@ -809,6 +834,7 @@ def generate_all_tasks(
     model_code: str | None = None,
     model_profile: dict | None = None,
     llm_config: dict | None = None,
+    model_image_count: int = 9,
 ) -> dict:
     """
     一站式生成所有图片任务
@@ -879,32 +905,37 @@ def generate_all_tasks(
                     pose_pool = ["自然站立展示商品正面", "侧身展示商品细节"]
                     has_llm_poses = True
 
-    # 11 张模特图/产品图的 prompt
-    fashion_tasks = []
-    for i in range(11):
+    model_image_count = max(0, min(9, int(model_image_count)))
+
+    # 9 张主图：前 N 张带模特，剩余为无模特商品图
+    main_tasks = []
+    for i in range(9):
+        shot_type = "model" if i < model_image_count else "product"
         result = build_fashion_prompt(
             i, product_type, country, model_code, category,
             scene_pool_override=scene_pool if has_llm_scenes else None,
             pose_pool_override=pose_pool if has_llm_poses else None,
             style_keywords_override=llm_style_keywords,
             composition_override=llm_composition_guide,
+            shot_type_override=shot_type,
         )
-        fashion_tasks.append({
+        main_tasks.append({
             "prompt": result["prompt"],
             "reference_url": image_url,
             "size": size,
             "resolution": resolution,
+            "kind": shot_type,
         })
 
-    # 白底图 + 对比图 + 细节图
+    # 1 张局部大图 + 1 张白底/对比合成图
     extra_tasks = [
-        {"prompt": build_white_bg_prompt(product_type, category), "reference_url": image_url, "size": size, "resolution": resolution},
-        {"prompt": build_comparison_prompt(product_type, category), "reference_url": image_url, "size": size, "resolution": resolution},
-        {"prompt": build_detail_prompt(product_type, category, detail_focus_override=meta_detail_focus if has_llm_detail else None), "reference_url": image_url, "size": size, "resolution": resolution},
+        {"prompt": build_detail_prompt(product_type, category, detail_focus_override=meta_detail_focus if has_llm_detail else None), "reference_url": image_url, "size": size, "resolution": resolution, "kind": "detail"},
+        {"prompt": build_white_comparison_prompt(product_type, category), "reference_url": image_url, "size": size, "resolution": resolution, "kind": "comparison"},
     ]
 
     return {
-        "tasks": fashion_tasks + extra_tasks,
+        "tasks": main_tasks + extra_tasks,
+        "model_image_count": model_image_count,
         "category": category,
         "country_config": country_config,
         "model_code": model_code,

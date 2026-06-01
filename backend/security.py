@@ -21,7 +21,7 @@ if not JWT_SECRET:
     print("[SECURITY] Set it in backend/.env: JWT_SECRET=<the generated value>")
     sys.exit(1)
 JWT_ALGORITHM = "HS256"
-TOKEN_EXPIRE_DAYS = 1
+TOKEN_EXPIRE_DAYS = 7
 JWT_EXPIRE_MINUTES = TOKEN_EXPIRE_DAYS * 24 * 60
 JWT_REFRESH_MINUTES = 7 * 24 * 60  # 刷新 token 有效期 7 天
 BCRYPT_ROUNDS = 12

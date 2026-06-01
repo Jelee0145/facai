@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useAuth } from "./auth-context";
+import { toast } from "@/components/ui/toast";
 import { logger } from "@/lib/logger";
 
 interface KeyHealth {
@@ -58,29 +59,26 @@ export default function DashboardPage() {
     if (editingKeyId === null) return;
     const balance = parseFloat(balanceInput);
     if (isNaN(balance) || balance < 0) {
-      alert('请输入有效的余额金额');
+      toast.warning('请输入有效的余额金额');
       return;
     }
 
     try {
-      console.log(`[BALANCE] Updating key ${editingKeyId} with balance ${balance}`);
       const url = `/api/admin/api-keys/${editingKeyId}`;
-      console.log(`[BALANCE] Request URL: ${url}`);
       const res = await fetchWithAuth(url, {
         method: 'PUT',
         body: JSON.stringify({ balance_usd: balance }),
       });
-      console.log(`[BALANCE] Response status: ${res.status}`);
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        console.error('Balance update failed:', res.status, err);
+        logger.error('Balance update failed:', res.status, err);
         throw new Error(err.detail || '更新失败');
       }
       setEditingKeyId(null);
       load();
     } catch (e) {
-      console.error('Balance update error:', e);
-      alert(`设置余额失败: ${e instanceof Error ? e.message : '未知错误'}`);
+      logger.error('Balance update error:', e);
+      toast.error(`设置余额失败: ${e instanceof Error ? e.message : '未知错误'}`);
     }
   };
 

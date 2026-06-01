@@ -13,7 +13,7 @@ class KeyManager:
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._current_index = 0
+        self._current_index = -1
 
     def get_active_key(self) -> Optional[dict]:
         """获取下一个可用 Key（轮询）"""

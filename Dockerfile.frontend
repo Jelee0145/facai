@@ -12,7 +12,7 @@ WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@latest --activate
 ENV NODE_ENV=production
 ENV HOSTNAME=0.0.0.0
-ENV PORT=5000
+ENV PORT=4524
 
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/dist ./dist
@@ -20,5 +20,5 @@ COPY --from=builder /app/public ./public
 COPY --from=builder /app/package.json /app/pnpm-lock.yaml /app/next.config.ts ./
 RUN pnpm install --prod --frozen-lockfile
 
-EXPOSE 5000
+EXPOSE 4524
 CMD ["node", "dist/server.js"]

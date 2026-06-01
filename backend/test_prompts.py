@@ -19,3 +19,16 @@ print(f"  First prompt length: {len(t['tasks'][0]['prompt'])} chars")
 print()
 print("=== First Prompt Preview ===")
 print(t['tasks'][0]['prompt'][:500])
+
+print()
+print("=== Model Count Split ===")
+for model_count in [0, 4, 9, -1, 10]:
+    t = generate_all_tasks("连衣裙", "http://test.com/1.png", "korea", "", "1:1", "1k", model_image_count=model_count)
+    kinds = [task.get("kind") for task in t["tasks"]]
+    expected_model_count = max(0, min(9, model_count))
+    assert len(t["tasks"]) == 11
+    assert kinds[:expected_model_count] == ["model"] * expected_model_count
+    assert kinds[expected_model_count:9] == ["product"] * (9 - expected_model_count)
+    assert kinds[9:] == ["detail", "comparison"]
+    assert t["model_image_count"] == expected_model_count
+    print(f"  requested={model_count:2d} -> model={expected_model_count}, product={9 - expected_model_count}, total={len(t['tasks'])}")
