@@ -8,6 +8,7 @@ import asyncio
 import base64
 import json
 import re
+import secrets
 import time
 import os
 import sys
@@ -234,7 +235,16 @@ async def startup():
                 print("[SECURITY] CRITICAL: Production requires a strong ADMIN_PASSWORD and admin account does not exist!")
                 sys.exit(1)
             else:
-                print("[SECURITY] WARNING: ADMIN_PASSWORD is not set. Admin account not created. Set ADMIN_PASSWORD and restart.")
+                # Dev: auto-generate password and create admin
+                _auto_pw = secrets.token_urlsafe(16)
+                create_user("admin", hash_password(_auto_pw))
+                print("=" * 60)
+                print(f"[INIT] Admin account created with AUTO-GENERATED password:")
+                print(f"  Username : admin")
+                print(f"  Password : {_auto_pw}")
+                print(f"[INIT] Please save this password! It will NOT be shown again.")
+                print(f"[INIT] You can also set ADMIN_PASSWORD in .env and restart.")
+                print("=" * 60)
         else:
             create_user("admin", hash_password(_admin_pw))
             print("[INIT] Admin account created from ADMIN_PASSWORD")

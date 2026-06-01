@@ -24,10 +24,16 @@ if not _admin:
         print("[SEED] CRITICAL: Production requires a strong ADMIN_PASSWORD to create admin!")
         sys.exit(1)
     if not _admin_pw:
-        # Dev: generate random password, do NOT write to file or print plaintext
+        # Dev: generate random password
         seed_password = secrets.token_urlsafe(16)
         create_user("admin", hash_password(seed_password))
-        print("[SEED] Admin account created with random password (not persisted to file)")
+        print("=" * 60)
+        print(f"[SEED] Admin account created with AUTO-GENERATED password:")
+        print(f"  Username : admin")
+        print(f"  Password : {seed_password}")
+        print(f"[SEED] Please save this password! It will NOT be shown again.")
+        print(f"[SEED] You can also set ADMIN_PASSWORD in .env and restart.")
+        print("=" * 60)
     else:
         create_user("admin", hash_password(_admin_pw))
         print("[SEED] Admin account created from ADMIN_PASSWORD")

@@ -234,6 +234,7 @@ export default function HomePage() {
   const [generationStatus, setGenerationStatus] = useState<string>("idle");
   const [latestImage, setLatestImage] = useState<string | null>(null);
   const [currentTaskId, setCurrentTaskId] = useState<string | null>(null);
+  const [simulatedProgressActive, setSimulatedProgressActive] = useState<boolean>(false);
   const [user, setUser] = useState<UserProfile | null>(null);
   const [wallet, setWallet] = useState<Wallet | null>(null);
   const [csrfToken, setCsrfToken] = useState("");
@@ -286,13 +287,36 @@ export default function HomePage() {
       .catch((e) => logger.error("Failed to load credit packages:", e));
   }, []);
 
+  // 计时器 - 生成期间每秒递增
+  useEffect(() => {
+    if (generationStatus !== "generating" && generationStatus !== "submitting") return;
+    const interval = setInterval(() => setElapsedSeconds((p) => p + 1), 1000);
+    return () => clearInterval(interval);
+  }, [generationStatus]);
+
+  // 模拟进度 - 每3-5秒递增3-7%，上限90%
+  useEffect(() => {
+    if (!simulatedProgressActive || generationStatus !== "generating") return;
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      setProgressPercent((prev) => {
+        if (prev >= 90) return prev;
+        return Math.min(prev + Math.floor(Math.random() * 5) + 3, 90);
+      });
+      timeoutId = setTimeout(tick, Math.floor(Math.random() * 2000) + 3000);
+    };
+    timeoutId = setTimeout(tick, 2000);
+    return () => clearTimeout(timeoutId);
+  }, [simulatedProgressActive, generationStatus]);
+
   useSSE(currentTaskId, {
     onProgress: (data: unknown) => {
       const d = data as Record<string, unknown>;
       const completed = typeof d.completed === "number" ? d.completed : 0;
       const total = typeof d.total === "number" ? d.total : TOTAL_GENERATION_IMAGES;
       setCompletedCount(completed);
-      setProgressPercent(Math.round((completed / total) * 100));
+      const realPercent = Math.round((completed / total) * 100);
+      setProgressPercent((prev) => Math.max(prev, realPercent));
       const images = Array.isArray(d.images) ? d.images as Array<Record<string, unknown>> : null;
       if (images) {
         const lastCompleted = images.findLast(
@@ -324,6 +348,7 @@ export default function HomePage() {
         if (typeof r.detailImage === "string") setDetailImage(r.detailImage);
       }
       setGenerationStatus("completed");
+      setSimulatedProgressActive(false);
       setProgressPercent(100);
       setIsLoading(false);
       setCurrentTaskId(null);
@@ -331,6 +356,7 @@ export default function HomePage() {
     },
     onError: (error: string) => {
       setGenerationStatus("error");
+      setSimulatedProgressActive(false);
       setIsLoading(false);
       setCurrentTaskId(null);
       toast.error("生成失败: " + error);
@@ -550,6 +576,7 @@ export default function HomePage() {
 
       const { task_id } = await startRes.json();
       setGenerationStatus("generating");
+      setSimulatedProgressActive(true);
       setCurrentTaskId(task_id);
     } catch (error) {
       logger.error("生成失败:", error);
@@ -1135,16 +1162,37 @@ export default function HomePage() {
             } text-white`}
           >
             {isLoading ? (
-              <div className="w-full space-y-4">
+              <div className="w-full px-6 space-y-4">
                 {/* 进度条 */}
                 <div className="space-y-2">
-                  <div className="flex justify-between text-sm text-white/80">
+                  <div className="text-center text-sm text-white/80">
                     <span>
-                      {generationStatus === "submitting" ? "正在提交任务..." : "AI 正在生成图片..."}
+                      {generationStatus === "submitting"
+                        ? "正在提交任务..."
+                        : "AI 正在生成图片，请耐心等待..."}
                     </span>
+                  </div>
+                  <div className="text-right text-sm text-white/80">
                     <span>{completedCount}/{totalCount} 张</span>
                   </div>
-                  <Progress value={progressPercent} className="h-3 bg-white/20 [&>div]:bg-gradient-to-r [&>div]:from-purple-400 [&>div]:via-pink-400 [&>div]:to-red-400" />
+                  <div className="relative h-3 bg-white/20 rounded-full overflow-hidden">
+                    {/* Shimmer 动画叠加层 */}
+                    <div
+                      className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent"
+                      style={{
+                        backgroundSize: "200% 100%",
+                        animation: "shimmer 2s infinite linear",
+                      }}
+                    />
+                    {/* 实际进度填充 */}
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-purple-400 via-pink-400 to-red-400"
+                      style={{
+                        width: `${progressPercent}%`,
+                        transition: "width 0.5s ease-out",
+                      }}
+                    />
+                  </div>
                 </div>
                 {/* 计时器 */}
                 <div className="flex items-center justify-center gap-6 text-sm text-white/70">

@@ -335,6 +335,9 @@ def update_key(key_id: int, **kwargs) -> bool:
         return False
     if updates.get("is_active") == 1:
         updates["fail_count"] = 0
+    # Reset daily usage when balance is manually updated
+    if "balance_usd" in updates:
+        updates["today_used"] = 0
     updates["updated_at"] = datetime.now().isoformat()
     set_clause = ", ".join(f"{k} = ?" for k in updates)
     vals = list(updates.values()) + [key_id]
