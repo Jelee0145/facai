@@ -26,13 +26,20 @@ interface OrderItem {
   created_at: string;
 }
 
-const emptyPackage: Omit<CreditPackage, "id"> = {
+interface PackageForm {
+  name: string;
+  price_fen: string;
+  points: string;
+  bonus_points: string;
+  sort_order: string;
+}
+
+const emptyForm: PackageForm = {
   name: "",
-  price_fen: 0,
-  points: 100,
-  bonus_points: 0,
-  status: "active",
-  sort_order: 100,
+  price_fen: "",
+  points: "",
+  bonus_points: "",
+  sort_order: "",
 };
 
 export default function BillingPage() {
@@ -40,7 +47,8 @@ export default function BillingPage() {
   const [packages, setPackages] = useState<CreditPackage[]>([]);
   const [orders, setOrders] = useState<OrderItem[]>([]);
   const [generationCostPoints, setGenerationCostPoints] = useState(10);
-  const [newPackage, setNewPackage] = useState(emptyPackage);
+  const [form, setForm] = useState<PackageForm>(emptyForm);
+  const [editingId, setEditingId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [mutating, setMutating] = useState(false);
 
@@ -83,22 +91,77 @@ export default function BillingPage() {
     }
   };
 
-  const addPackage = async () => {
-    if (!newPackage.name.trim()) {
+  const startEdit = (pkg: CreditPackage) => {
+    setEditingId(pkg.id);
+    setForm({
+      name: pkg.name,
+      price_fen: String(pkg.price_fen),
+      points: String(pkg.points),
+      bonus_points: String(pkg.bonus_points),
+      sort_order: String(pkg.sort_order),
+    });
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setForm(emptyForm);
+  };
+
+  const submitForm = async () => {
+    if (!form.name.trim()) {
       toast.warning("请输入套餐名称");
       return;
     }
+    if (!form.price_fen || !form.points) {
+      toast.warning("请填写价格和积分");
+      return;
+    }
+
+    const body = {
+      name: form.name.trim(),
+      price_fen: parseInt(form.price_fen) || 0,
+      points: parseInt(form.points) || 0,
+      bonus_points: parseInt(form.bonus_points) || 0,
+      status: "active",
+      sort_order: parseInt(form.sort_order) || 100,
+    };
+
     setMutating(true);
     try {
-      const r = await fetchWithAuth("/api/admin/credit-packages", {
-        method: "POST",
-        body: JSON.stringify(newPackage),
-      });
+      const url = editingId
+        ? `/api/admin/credit-packages/${editingId}`
+        : "/api/admin/credit-packages";
+      const method = editingId ? "PUT" : "POST";
+      const r = await fetchWithAuth(url, { method, body: JSON.stringify(body) });
       if (!r.ok) {
-        toast.error("套餐保存失败");
+        toast.error(editingId ? "套餐更新失败" : "套餐创建失败");
         return;
       }
-      setNewPackage(emptyPackage);
+      toast.success(editingId ? "套餐已更新" : "套餐已创建");
+      cancelEdit();
+      load();
+    } finally {
+      setMutating(false);
+    }
+  };
+
+  const deletePackage = async (pkg: CreditPackage) => {
+    if (!window.confirm(`确定删除套餐「${pkg.name}」吗？此操作不可撤销。`)) return;
+    setMutating(true);
+    try {
+      const r = await fetchWithAuth(`/api/admin/credit-packages/${pkg.id}`, {
+        method: "DELETE",
+      });
+      if (!r.ok) {
+        if (r.status === 409) {
+          toast.error("该套餐已有关联订单，无法删除。可改为停用。");
+        } else {
+          toast.error("删除失败");
+        }
+        return;
+      }
+      toast.success("套餐已删除");
+      if (editingId === pkg.id) cancelEdit();
       load();
     } finally {
       setMutating(false);
@@ -144,6 +207,7 @@ export default function BillingPage() {
         {loading && <span className="text-sm text-gray-500">加载中...</span>}
       </div>
 
+      {/* 生成扣费 */}
       <section className="bg-gray-900 border border-gray-800 rounded-xl p-4">
         <h2 className="text-lg font-semibold mb-4">生成扣费</h2>
         <div className="flex gap-3">
@@ -163,29 +227,143 @@ export default function BillingPage() {
         </div>
       </section>
 
+      {/* 积分套餐 */}
       <section className="bg-gray-900 border border-gray-800 rounded-xl p-4">
-        <h2 className="text-lg font-semibold mb-4">积分套餐</h2>
+        <h2 className="text-lg font-semibold mb-4">
+          积分套餐
+          {editingId !== null && (
+            <span className="ml-2 text-sm font-normal text-yellow-400">
+              编辑模式
+            </span>
+          )}
+        </h2>
+
+        {/* 表单 */}
         <div className="grid grid-cols-1 md:grid-cols-6 gap-3 mb-4">
-          <input value={newPackage.name} onChange={(e) => setNewPackage({ ...newPackage, name: e.target.value })} placeholder="套餐名" className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white" />
-          <input type="number" value={newPackage.price_fen} onChange={(e) => setNewPackage({ ...newPackage, price_fen: parseInt(e.target.value) || 0 })} placeholder="价格分" className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white" />
-          <input type="number" value={newPackage.points} onChange={(e) => setNewPackage({ ...newPackage, points: parseInt(e.target.value) || 1 })} placeholder="积分" className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white" />
-          <input type="number" value={newPackage.bonus_points} onChange={(e) => setNewPackage({ ...newPackage, bonus_points: parseInt(e.target.value) || 0 })} placeholder="赠送" className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white" />
-          <input type="number" value={newPackage.sort_order} onChange={(e) => setNewPackage({ ...newPackage, sort_order: parseInt(e.target.value) || 100 })} placeholder="排序" className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white" />
-          <button onClick={addPackage} disabled={mutating} className="px-4 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50 rounded-lg text-sm">新增套餐</button>
+          <input
+            value={form.name}
+            onChange={(e) => setForm({ ...form, name: e.target.value })}
+            placeholder="套餐名称，如：体验包"
+            className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder:text-gray-500"
+          />
+          <input
+            type="number"
+            min={0}
+            value={form.price_fen}
+            onChange={(e) => setForm({ ...form, price_fen: e.target.value })}
+            placeholder="价格（分），如 990"
+            className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder:text-gray-500"
+          />
+          <input
+            type="number"
+            min={1}
+            value={form.points}
+            onChange={(e) => setForm({ ...form, points: e.target.value })}
+            placeholder="基础积分数量"
+            className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder:text-gray-500"
+          />
+          <input
+            type="number"
+            min={0}
+            value={form.bonus_points}
+            onChange={(e) => setForm({ ...form, bonus_points: e.target.value })}
+            placeholder="赠送积分数量"
+            className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder:text-gray-500"
+          />
+          <input
+            type="number"
+            min={0}
+            value={form.sort_order}
+            onChange={(e) => setForm({ ...form, sort_order: e.target.value })}
+            placeholder="排序权重，越小越靠前"
+            className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder:text-gray-500"
+          />
+          <div className="flex gap-2">
+            <button
+              onClick={submitForm}
+              disabled={mutating}
+              className={`flex-1 px-4 py-2 disabled:opacity-50 rounded-lg text-sm ${
+                editingId !== null
+                  ? "bg-yellow-600 hover:bg-yellow-700"
+                  : "bg-green-600 hover:bg-green-700"
+              }`}
+            >
+              {editingId !== null ? "保存修改" : "新增套餐"}
+            </button>
+            {editingId !== null && (
+              <button
+                onClick={cancelEdit}
+                disabled={mutating}
+                className="px-3 py-2 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 rounded-lg text-sm"
+              >
+                取消
+              </button>
+            )}
+          </div>
         </div>
+
+        {/* 套餐卡片 */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           {packages.map((pkg) => (
-            <div key={pkg.id} className="border border-gray-800 rounded-lg p-4">
-              <div className="font-semibold">{pkg.name}</div>
-              <div className="text-gray-400 text-sm mt-1">¥{(pkg.price_fen / 100).toFixed(2)} · {pkg.points + pkg.bonus_points} 积分</div>
-              <button onClick={() => togglePackage(pkg)} disabled={mutating} className="mt-3 px-3 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 rounded text-xs">
-                {pkg.status === "active" ? "停用" : "启用"}
-              </button>
+            <div
+              key={pkg.id}
+              className={`border rounded-lg p-4 ${
+                editingId === pkg.id
+                  ? "border-yellow-500 bg-gray-800/50"
+                  : "border-gray-800"
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="font-semibold">{pkg.name}</span>
+                <span
+                  className={`text-xs px-2 py-0.5 rounded ${
+                    pkg.status === "active"
+                      ? "bg-green-900 text-green-300"
+                      : "bg-gray-700 text-gray-400"
+                  }`}
+                >
+                  {pkg.status === "active" ? "启用" : "停用"}
+                </span>
+              </div>
+              <div className="text-gray-400 text-sm mt-2 space-y-0.5">
+                <div>价格：¥{(pkg.price_fen / 100).toFixed(2)}</div>
+                <div>
+                  积分：{pkg.points} 基础
+                  {pkg.bonus_points > 0 && ` + ${pkg.bonus_points} 赠送`}
+                  {" = "}
+                  <span className="text-white">{pkg.points + pkg.bonus_points}</span>
+                </div>
+                <div>排序：{pkg.sort_order}</div>
+              </div>
+              <div className="flex gap-2 mt-3">
+                <button
+                  onClick={() => startEdit(pkg)}
+                  disabled={mutating}
+                  className="px-3 py-1 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded text-xs"
+                >
+                  编辑
+                </button>
+                <button
+                  onClick={() => togglePackage(pkg)}
+                  disabled={mutating}
+                  className="px-3 py-1 bg-gray-800 hover:bg-gray-700 disabled:opacity-50 rounded text-xs"
+                >
+                  {pkg.status === "active" ? "停用" : "启用"}
+                </button>
+                <button
+                  onClick={() => deletePackage(pkg)}
+                  disabled={mutating}
+                  className="px-3 py-1 bg-red-900 hover:bg-red-800 disabled:opacity-50 rounded text-xs text-red-300"
+                >
+                  删除
+                </button>
+              </div>
             </div>
           ))}
         </div>
       </section>
 
+      {/* 充值订单 */}
       <section className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
         <div className="p-4 font-semibold">充值订单</div>
         <table className="w-full text-sm">

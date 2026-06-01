@@ -67,7 +67,7 @@ from database import (
     charge_generation, create_customer, create_order, get_active_keys, get_generation_cost_points,
     get_wallet, list_all_orders, list_credit_packages, list_user_history,
     list_user_ledger, list_user_orders, mark_order_paid,
-    upsert_credit_package, get_user, create_user, ensure_refund_once,
+    upsert_credit_package, delete_credit_package, get_user, create_user, ensure_refund_once,
     mask_api_key, update_admin_password,
     get_user_history_detail,
     list_all_users, admin_create_user, update_user_status, update_user_note, delete_user,
@@ -1887,6 +1887,23 @@ async def admin_update_credit_package(
     except ValueError:
         raise HTTPException(status_code=404, detail="套餐不存在")
     return {"message": "updated"}
+
+
+@app.delete("/admin/credit-packages/{package_id}")
+@limiter.limit("20/minute")
+async def admin_delete_credit_package(
+    request: Request,
+    package_id: int,
+    user: dict = Depends(authenticate),
+    _csrf=Depends(verify_csrf),
+):
+    deleted = delete_credit_package(package_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=409,
+            detail="该套餐已有关联订单，无法删除。可改为停用。",
+        )
+    return {"message": "deleted"}
 
 
 @app.put("/admin/generation-cost")

@@ -13,6 +13,7 @@ interface ApiKey {
   today_used: number;
   daily_limit: number;
   fail_count: number;
+  balance_usd: number;
 }
 
 export default function KeysPage() {
@@ -145,7 +146,11 @@ export default function KeysPage() {
                     {k.is_active ? "启用" : "禁用"}
                   </span>
                 </td>
-                <td className="px-4 py-3 text-gray-400">{k.today_used}/{k.daily_limit}</td>
+                <td className="px-4 py-3 text-gray-400">
+                  {k.balance_usd > 0
+                    ? <>剩余 <span className="text-purple-400 font-semibold">{Math.floor(k.balance_usd / 0.006)}</span> 张</>
+                    : `${k.today_used}/${k.daily_limit}`}
+                </td>
                 <td className="px-4 py-3">
                   {k.fail_count > 0 ? <span className="text-red-400">{k.fail_count}</span> : <span className="text-gray-500">0</span>}
                 </td>

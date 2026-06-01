@@ -129,16 +129,27 @@ export default function DashboardPage() {
                 {k.fail_count > 0 ? `${k.fail_count} 次失败` : "正常"}
               </span>
             </div>
-            <div className="w-full bg-gray-800 rounded-full h-2">
-              <div
-                className={`h-2 rounded-full transition-all ${k.usage_pct > 80 ? "bg-red-500" : "bg-purple-500"}`}
-                style={{ width: `${Math.min(k.usage_pct, 100)}%` }}
-              />
-            </div>
-            <div className="flex justify-between text-xs text-gray-500 mt-1">
-              <span>{k.today_used} / {k.daily_limit}</span>
-              <span>{k.usage_pct}%</span>
-            </div>
+            {k.balance_usd > 0 ? (
+              <div className="flex justify-between text-xs text-gray-400 mt-2">
+                <span>
+                  剩余 <span className="text-purple-400 font-semibold">{k.remaining_quota || 0}</span> 张
+                  <span className="text-gray-500 ml-2">${(k.balance_usd || 0).toFixed(2)}</span>
+                </span>
+              </div>
+            ) : (
+              <>
+                <div className="w-full bg-gray-800 rounded-full h-2 mt-2">
+                  <div
+                    className={`h-2 rounded-full transition-all ${k.usage_pct > 80 ? "bg-red-500" : "bg-purple-500"}`}
+                    style={{ width: `${Math.min(k.usage_pct, 100)}%` }}
+                  />
+                </div>
+                <div className="flex justify-between text-xs text-gray-500 mt-1">
+                  <span>{k.today_used} / {k.daily_limit}</span>
+                  <span>{k.usage_pct}%</span>
+                </div>
+              </>
+            )}
 
             {/* Balance Information */}
             <div className="flex items-center justify-between mt-3 pt-3 border-t border-gray-800">

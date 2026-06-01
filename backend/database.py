@@ -888,6 +888,19 @@ def upsert_credit_package(
     return int(cur.lastrowid)
 
 
+def delete_credit_package(package_id: int) -> bool:
+    """硬删除套餐，若有订单关联则返回 False 不删除。"""
+    db = get_db()
+    has_orders = db.execute(
+        "SELECT 1 FROM orders WHERE package_id = ? LIMIT 1", (package_id,)
+    ).fetchone()
+    if has_orders:
+        return False
+    cur = db.execute("DELETE FROM credit_packages WHERE id = ?", (package_id,))
+    db.commit()
+    return cur.rowcount > 0
+
+
 def get_order_by_no(order_no: str) -> Optional[dict]:
     db = get_db()
     row = db.execute(
