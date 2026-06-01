@@ -781,6 +781,21 @@ def build_white_bg_prompt(product_type: str, category: dict) -> str:
 # 五、快速生成入口（兼容旧接口）
 # ============================================================
 
+def _normalize_tags(raw_tags: list[str]) -> list[str]:
+    """将 LLM 可能返回的拼接标签拆分为独立标签"""
+    result = []
+    for tag in raw_tags:
+        parts = re.split(r'[\s,]+', tag.strip())
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            if not part.startswith('#'):
+                part = '#' + part
+            result.append(part)
+    return result if result else raw_tags
+
+
 def generate_all_tasks(
     product_type: str,
     image_url: str,
@@ -844,7 +859,7 @@ def generate_all_tasks(
         if md.get("titles"):
             meta_titles = md["titles"]
         if md.get("tags"):
-            meta_tags = md["tags"]
+            meta_tags = _normalize_tags(md["tags"])
         if md.get("description"):
             meta_desc = md["description"]
         if md.get("target_audience"):
