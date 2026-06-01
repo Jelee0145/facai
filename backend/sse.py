@@ -57,16 +57,25 @@ async def unsubscribe(task_id: str, q: asyncio.Queue[dict]):
     logger.debug(f"[SSE] Unsubscribed from {task_id}")
 
 
-async def sse_stream(task_id: str, timeout: float = SSE_IDLE_TIMEOUT):
-    """异步生成器：生成 SSE 数据帧，超时或 completed/failed 后结束"""
+async def sse_stream(task_id: str, timeout: float = SSE_IDLE_TIMEOUT, initial_event: dict | None = None):
+    """异步生成器：生成 SSE 数据帧。
+
+    空闲时发送 SSE comment 保活，不把连接空闲误判为任务失败；任务终态由生成流程
+    显式推送 completed/failed/error。
+    """
     q = await subscribe(task_id)
     try:
+        if initial_event:
+            yield f"data: {json.dumps(initial_event, ensure_ascii=False)}\n\n"
+            if initial_event.get("status") in ("completed", "failed", "error", "timeout"):
+                return
+
         while True:
             try:
                 data = await asyncio.wait_for(q.get(), timeout=timeout)
             except asyncio.TimeoutError:
-                yield f"data: {json.dumps({'status': 'timeout', 'error': 'No progress for too long'}, ensure_ascii=False)}\n\n"
-                return
+                yield ": keep-alive\n\n"
+                continue
             yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
             if data.get("status") in ("completed", "failed", "error", "timeout"):
                 return

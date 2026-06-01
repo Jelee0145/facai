@@ -342,6 +342,9 @@ app.add_middleware(
 # ========== Apimart 配置 ==========
 APIMART_BASE = "https://api.apimart.ai/v1"
 MAX_CONCURRENT = 3  # 每次最多 3 个并发请求
+APIMART_INITIAL_WAIT_SECONDS = int(os.getenv("APIMART_INITIAL_WAIT_SECONDS", "15"))
+APIMART_POLL_INTERVAL_SECONDS = int(os.getenv("APIMART_POLL_INTERVAL_SECONDS", "4"))
+APIMART_POLL_TIMEOUT_SECONDS = int(os.getenv("APIMART_POLL_TIMEOUT_SECONDS", "3600"))
 
 
 # ========== 请求/响应模型 ==========
@@ -463,20 +466,76 @@ def get_task_for_request(task_id: str, request: Request, user: dict) -> dict:
     return p
 
 
-# ========== Apimart API 工具函数 ==========
-async def _apimart_request(url: str, method: str = "POST", json_body: dict = None, retries: int = 3):
-    """带重试和多 Key 支持的 apimart API 请求"""
-    key_row = key_manager.get_active_key()
-    if not key_row:
-        raise HTTPException(status_code=409, detail="所有 API Key 均已失效，请到后台检查或添加新 Key")
+def build_progress_event(p: dict) -> dict:
+    status = p.get("status", "generating")
+    event_status = "failed" if status == "error" else status
+    event = {
+        "status": event_status,
+        "total": p.get("total", TOTAL_GENERATION_IMAGES),
+        "completed": p.get("completed", 0),
+        "images": [
+            {"index": img["index"], "status": img["status"], "url": img.get("url"), "name": img["name"]}
+            for img in p.get("images", [])
+        ],
+    }
+    if p.get("result") is not None:
+        event["result"] = p["result"]
+    if p.get("error"):
+        event["error"] = p["error"]
+    if p.get("partial") is not None:
+        event["partial"] = p.get("partial")
+        event["success_count"] = p.get("success_count", p.get("completed", 0))
+        event["total_count"] = p.get("total", TOTAL_GENERATION_IMAGES)
+    return event
 
-    api_key = key_row["key_value"]
+
+# ========== Apimart API 工具函数 ==========
+def _apimart_error_message(resp: httpx.Response, fallback: str) -> str:
+    try:
+        error_body = resp.json() if resp.text else {}
+    except Exception:
+        return fallback
+    if isinstance(error_body, dict):
+        error = error_body.get("error")
+        if isinstance(error, dict) and error.get("message"):
+            return str(error["message"])
+        if error_body.get("message"):
+            return str(error_body["message"])
+        if error_body.get("detail"):
+            return str(error_body["detail"])
+    return fallback
+
+
+async def _apimart_request(
+    url: str,
+    method: str = "POST",
+    json_body: dict = None,
+    retries: int = 3,
+    api_key: str | None = None,
+    rotate_on_auth_failure: bool = True,
+    count_success: bool = True,
+    count_auth_failure: bool = True,
+    return_key: bool = False,
+):
+    """带重试和多 Key 支持的 apimart API 请求。
+
+    生成任务提交会轮询可用 Key；任务状态查询必须传入创建该 task 的 Key，
+    避免用 B Key 查询 A Key 创建的 task 后把有效 Key 误判为鉴权失败。
+    """
+    selected_key = api_key
+    if not selected_key:
+        key_row = key_manager.get_active_key()
+        if not key_row:
+            raise HTTPException(status_code=409, detail="所有 API Key 均已失效，请到后台检查或添加新 Key")
+        selected_key = key_row["key_value"]
+
+    auth_failed_keys: set[str] = set()
 
     for attempt in range(retries):
         try:
             async with httpx.AsyncClient(timeout=90.0) as client:
                 headers = {
-                    "Authorization": f"Bearer {api_key}",
+                    "Authorization": f"Bearer {selected_key}",
                     "Content-Type": "application/json",
                 }
                 if method == "POST":
@@ -485,29 +544,40 @@ async def _apimart_request(url: str, method: str = "POST", json_body: dict = Non
                     resp = await client.get(url, headers=headers)
 
                 if resp.status_code == 200:
-                    key_manager.mark_success(api_key)
-                    return resp.json()
+                    if count_success:
+                        key_manager.mark_success(selected_key)
+                    result = resp.json()
+                    return (result, selected_key) if return_key else result
 
                 # Only authentication/permission failures prove the key itself is bad.
                 if resp.status_code in (401, 403):
-                    key_manager.mark_failure(api_key)
-                    new_key = key_manager.get_active_key()
-                    if new_key:
-                        api_key = new_key["key_value"]
-                        print(f"  Key 失效，切换到: {api_key[:15]}...")
-                        continue
-                    raise HTTPException(status_code=502, detail="所有 API Key 鉴权均失败，请到后台检查 Key 状态")
+                    first_auth_failure_for_key = selected_key not in auth_failed_keys
+                    auth_failed_keys.add(selected_key)
+                    if count_auth_failure and first_auth_failure_for_key:
+                        key_manager.mark_failure(selected_key)
+                    if rotate_on_auth_failure and not api_key:
+                        new_key_value = None
+                        for _ in range(max(len(get_active_keys()), 1)):
+                            new_key = key_manager.get_active_key()
+                            if new_key and new_key["key_value"] not in auth_failed_keys:
+                                new_key_value = new_key["key_value"]
+                                break
+                        if new_key_value:
+                            selected_key = new_key_value
+                            print(f"  Key 失效，切换到: {selected_key[:15]}...")
+                            continue
+                        raise HTTPException(status_code=502, detail="所有 API Key 鉴权均失败，请到后台检查 Key 状态")
+                    raise HTTPException(status_code=502, detail="Apimart 任务查询鉴权失败，已保护 API Key 不自动禁用")
 
                 # Quota/payment failures should be surfaced, not counted as auth failure.
                 if resp.status_code == 402:
                     raise HTTPException(status_code=402, detail="Apimart API Key 额度不足或账号未开通 (402)")
 
-                error_body = resp.json() if resp.text else {}
                 raise HTTPException(
                     status_code=502,
-                    detail=error_body.get("error", {}).get("message", f"Apimart {resp.status_code}"),
+                    detail=_apimart_error_message(resp, f"Apimart {resp.status_code}"),
                 )
-        except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError) as e:
+        except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, httpx.TimeoutException) as e:
             if attempt < retries - 1:
                 delay = 2 * (attempt + 1)
                 print(f"  [重试 {attempt+1}/{retries-1}] 网络错误，{delay}s 后重试...")
@@ -608,42 +678,52 @@ async def apimart_generate(prompt: str, reference_url: str = None, size: str = "
     if reference_url:
         body["image_urls"] = [reference_url]
 
-    result = await _apimart_request(f"{APIMART_BASE}/images/generations", "POST", body)
+    result, task_api_key = await _apimart_request(
+        f"{APIMART_BASE}/images/generations",
+        "POST",
+        body,
+        return_key=True,
+    )
     task_id = result["data"][0].get("task_id")
     if not task_id:
         raise HTTPException(status_code=502, detail="未返回 task_id")
 
     # 等待（文档建议 10-20s）
-    await asyncio.sleep(15)
+    await asyncio.sleep(APIMART_INITIAL_WAIT_SECONDS)
 
     # 轮询
-    for round_num in range(30):
-        qr = await _query_single_task(task_id, reference_url)
+    deadline = time.monotonic() + APIMART_POLL_TIMEOUT_SECONDS
+    round_num = 0
+    while time.monotonic() < deadline:
+        round_num += 1
+        qr = await _query_single_task(task_id, reference_url, task_api_key)
         if isinstance(qr, str) and qr != "failed":
             return qr
         if qr == "failed":
             raise HTTPException(status_code=502, detail="图片生成任务失败")
         if isinstance(qr, dict):
-            print(f"  [轮询 #{round_num+1}] status={qr['status']}, progress={qr.get('progress', 0)}")
-        await asyncio.sleep(4)
+            print(f"  [轮询 #{round_num}] status={qr['status']}, progress={qr.get('progress', 0)}")
+        await asyncio.sleep(APIMART_POLL_INTERVAL_SECONDS)
 
-    raise HTTPException(status_code=502, detail="任务轮询超时")
+    raise HTTPException(status_code=502, detail=f"任务轮询超时（超过 {APIMART_POLL_TIMEOUT_SECONDS} 秒）")
 
 
 async def apimart_batch_generate(
     tasks: list[dict],
     on_progress: Optional[callable] = None,
+    on_heartbeat: Optional[callable] = None,
 ) -> list[str]:
     """
     批量生成：分批提交 → 统一等待 → 批量轮询
     tasks: [{prompt, reference_url, size, resolution}, ...]
     on_progress: 可选回调 (index, url) — 每完成一张图时调用
+    on_heartbeat: 可选回调 (processing_count) — 长时间等待时发送心跳
     """
     total = len(tasks)
     print(f"\n[BATCH] apimart batch generate: submitting {total} tasks (concurrency {MAX_CONCURRENT})...")
 
     # Step 1: 分批提交
-    submissions = []  # [(index, task_id)]
+    submissions = []  # [(index, task_id, api_key)]
     for batch_start in range(0, total, MAX_CONCURRENT):
         batch = tasks[batch_start : batch_start + MAX_CONCURRENT]
         batch_futures = []
@@ -656,33 +736,40 @@ async def apimart_batch_generate(
             if isinstance(r, tuple):
                 submissions.append(r)
 
-    task_ids = [tid for _, tid in submissions]
-    task_map = {tid: idx for idx, tid in submissions}
+    task_ids = [tid for _, tid, _ in submissions]
+    task_map = {tid: idx for idx, tid, _ in submissions}
+    task_api_keys = {tid: used_key for _, tid, used_key in submissions}
     print(f"\n[PROGRESS] Submitted: {len(task_ids)}/{total}")
 
     if not task_ids:
         raise HTTPException(status_code=502, detail="图片生成任务提交失败")
 
-    # Step 2: 等待 15s（文档建议 10-20s）
-    await asyncio.sleep(15)
+    # Step 2: 等待（文档建议 10-20s）
+    await asyncio.sleep(APIMART_INITIAL_WAIT_SECONDS)
 
-    # Step 3: 批量轮询 — 带早失败和超时保护
+    # Step 3: 批量轮询 — 后端持续保活，直到完成、上游终态失败或服务端总超时
     results = [None] * total
-    no_progress_count = 0
-    MAX_NO_PROGRESS = 5  # 连续 5 轮无进展则提前终止
+    deadline = time.monotonic() + APIMART_POLL_TIMEOUT_SECONDS
+    round_num = 0
 
-    for round_num in range(30):
+    while time.monotonic() < deadline:
+        round_num += 1
         pending = [tid for tid in task_ids if results[task_map[tid]] is None]
         if not pending:
             break
 
         completed_this_round = 0
+        active_processing = 0  # 统计仍在处理中的任务数
         fatal_error = None
 
         try:
             query_results = await asyncio.gather(
                 *[
-                    _query_single_task(tid, tasks[task_map[tid]].get("reference_url"))
+                    _query_single_task(
+                        tid,
+                        tasks[task_map[tid]].get("reference_url"),
+                        task_api_keys.get(tid),
+                    )
                     for tid in pending
                 ],
                 return_exceptions=True,
@@ -700,7 +787,7 @@ async def apimart_batch_generate(
                     if on_progress:
                         on_progress(idx, qr)
                 elif qr == "failed":
-                    results[idx] = None  # 标记为失败
+                    results[idx] = "FAILED"  # 使用哨兵值区分真正失败 vs 未轮询
                     completed_this_round += 1
                     if on_progress:
                         on_progress(idx, None)
@@ -708,7 +795,7 @@ async def apimart_batch_generate(
                     fatal_error = qr
                     break
                 elif isinstance(qr, dict):
-                    pass  # pending/processing，继续等
+                    active_processing += 1  # 任务仍在处理中
                 # elif qr is None: 网络错误，继续等
 
         except Exception as e:
@@ -718,35 +805,41 @@ async def apimart_batch_generate(
             print(f"  [FATAL] 致命错误，终止轮询: {fatal_error.detail}")
             raise fatal_error
 
-        # 本轮无进展计数
-        if completed_this_round == 0:
-            no_progress_count += 1
-            if no_progress_count >= MAX_NO_PROGRESS:
-                print(f"  [TIMEOUT] 连续 {MAX_NO_PROGRESS} 轮无进展，提前终止")
-                break
-        else:
-            no_progress_count = 0
-
         remaining = sum(1 for r in results if r is None)
-        print(f"  [轮询 #{round_num+1}] +{completed_this_round} done, remaining {remaining}/{total}")
+        stalled_count = len(pending) - completed_this_round - active_processing
+        if completed_this_round == 0 and on_heartbeat:
+            on_heartbeat(active_processing, stalled_count)
+
+        print(f"  [轮询 #{round_num}] +{completed_this_round} done, {active_processing} processing, {stalled_count} waiting, remaining {remaining}/{total}")
 
         if remaining == 0:
             break
-        await asyncio.sleep(4)
+        await asyncio.sleep(APIMART_POLL_INTERVAL_SECONDS)
 
     # 统计成功数量，全部失败则报错
-    success_count = sum(1 for r in results if r is not None)
+    success_count = sum(1 for r in results if r is not None and r != "FAILED")
     if success_count == 0:
+        pending_count = sum(1 for r in results if r is None)
+        if pending_count > 0:
+            raise HTTPException(status_code=502, detail=f"图片生成仍未完成，后端轮询超时（超过 {APIMART_POLL_TIMEOUT_SECONDS} 秒）")
         raise HTTPException(status_code=502, detail="图片生成全部失败，请稍后重试")
-    final_results = [r if r else "" for r in results]
-    for i, r in enumerate(results):
-        if r is None and on_progress:
-            on_progress(i, None)
-            print(f"  [WARN] Image {i} generation failed")
+
+    # 构建最终结果：成功URL或空字符串
+    final_results = [r if (r and r != "FAILED") else "" for r in results]
+
+    # 只对被放弃的任务（None）推送失败事件，不重复推送已确认失败的（"FAILED"）
+    abandoned_count = sum(1 for r in results if r is None)
+    if abandoned_count > 0:
+        print(f"  [WARN] {abandoned_count} task(s) abandoned (still processing when loop ended)")
+        for i, r in enumerate(results):
+            if r is None:
+                if on_progress:
+                    on_progress(i, None)
+                print(f"  [WARN] Image {i} generation failed")
     return final_results
 
 
-async def _submit_task(task: dict, index: int, total: int) -> tuple[int, str]:
+async def _submit_task(task: dict, index: int, total: int) -> tuple[int, str, str]:
     """提交单个任务，返回 (index, task_id)"""
     try:
         body = {
@@ -759,16 +852,21 @@ async def _submit_task(task: dict, index: int, total: int) -> tuple[int, str]:
         if task.get("reference_url"):
             body["image_urls"] = [task["reference_url"]]
 
-        result = await _apimart_request(f"{APIMART_BASE}/images/generations", "POST", body)
+        result, used_api_key = await _apimart_request(
+            f"{APIMART_BASE}/images/generations",
+            "POST",
+            body,
+            return_key=True,
+        )
         tid = result["data"][0]["task_id"]
         print(f"  [{index+1}/{total}] 已提交: {tid}")
-        return (index, tid)
+        return (index, tid, used_api_key)
     except Exception as e:
         print(f"  [{index+1}/{total}] 提交失败: {e}")
         raise
 
 
-async def _query_single_task(task_id: str, reference_url: str | None = None):
+async def _query_single_task(task_id: str, reference_url: str | None = None, api_key: str | None = None):
     """查询单个任务状态。
     返回:
       str (URL) — completed，成功拿到图片
@@ -779,7 +877,14 @@ async def _query_single_task(task_id: str, reference_url: str | None = None):
       HTTPException — 不可重试的致命错误 (由 _apimart_request 抛出的 401/402/429 等)
     """
     try:
-        task = await _apimart_request(f"{APIMART_BASE}/tasks/{task_id}", "GET")
+        task = await _apimart_request(
+            f"{APIMART_BASE}/tasks/{task_id}",
+            "GET",
+            api_key=api_key,
+            rotate_on_auth_failure=False,
+            count_success=False,
+            count_auth_failure=False,
+        )
         data = task.get("data", {})
         status = data.get("status")
 
@@ -1317,13 +1422,26 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
                 ],
             })
 
+        def on_heartbeat(processing_count: int, waiting_count: int = 0):
+            """长时间等待时发送心跳，保持SSE连接活跃"""
+            p = task_store.get(task_id)
+            if p:
+                push_event(task_id, {
+                    "status": "generating",
+                    "total": p["total"],
+                    "completed": p["completed"],
+                    "heartbeat": True,
+                    "processing_count": processing_count,
+                    "waiting_count": waiting_count,
+                })
+
         progress["status"] = "generating"
         save_task_progress(task_id, progress)
         push_event(task_id, {"status": "generating", "total": progress["total"], "completed": 0})
 
         # 批量生成
         urls = await apimart_batch_generate(
-            gen_result["tasks"], on_progress
+            gen_result["tasks"], on_progress, on_heartbeat
         )
 
         # 构建结果
@@ -1334,6 +1452,11 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
         detail_url = split["detail_image"]
         comparison_url = split["comparison_image"]
         tags = _response_tags(gen_result, country_config)
+
+        # 检测是否为部分完成
+        success_count = sum(1 for u in urls if u)  # 非空字符串数量
+        total_count = len(urls)
+        is_partial = success_count < total_count
 
         model_profile = get_model_profile(model_code)
 
@@ -1358,8 +1481,21 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
             },
         }
         progress["status"] = "completed"
+        if is_partial:
+            progress["partial"] = True
+            progress["success_count"] = success_count
+            progress["failed_count"] = total_count - success_count
+            print(f"[PARTIAL] Background task {task_id} completed with {success_count}/{total_count} images")
+        else:
+            progress["partial"] = False
         save_task_progress(task_id, progress)
-        push_event(task_id, {"status": "completed", "result": progress["result"]})
+        push_event(task_id, {
+            "status": "completed",
+            "result": progress["result"],
+            "partial": is_partial,
+            "success_count": success_count,
+            "total_count": total_count,
+        })
         _active_tasks.discard(task_id)
         print(f"[DONE] Background task {task_id} completed")
 
@@ -1465,17 +1601,18 @@ async def generate_status(
     p = get_task_for_request(task_id, request, user)
 
     elapsed = time.time() - p["start_time"]
+    event = build_progress_event(p)
     return {
         "status": p["status"],
-        "total": p["total"],
-        "completed": p["completed"],
+        "total": event["total"],
+        "completed": event["completed"],
         "elapsed_seconds": round(elapsed, 1),
-        "images": [
-            {"index": img["index"], "status": img["status"], "url": img["url"], "name": img["name"]}
-            for img in p["images"]
-        ],
-        "result": p.get("result"),
-        "error": p.get("error"),
+        "images": event["images"],
+        "result": event.get("result"),
+        "error": event.get("error"),
+        "partial": event.get("partial"),
+        "success_count": event.get("success_count"),
+        "total_count": event.get("total_count"),
     }
 
 
@@ -1487,9 +1624,9 @@ async def generate_status_stream(
     user: dict = Depends(authenticate_customer),
 ):
     """SSE 实时进度流"""
-    get_task_for_request(task_id, request, user)
+    progress = get_task_for_request(task_id, request, user)
     return StreamingResponse(
-        sse_stream(task_id),
+        sse_stream(task_id, initial_event=build_progress_event(progress)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -486,7 +486,7 @@
 
 #### `POST /api/generate/async` — 异步图片生成
 
-启动后台任务生成全部 14 张图，立即返回 `task_id`。客户端通过 SSE 或轮询获取进度。
+启动后台任务生成全部 14 张图，立即返回 `task_id`。推荐客户端通过 SSE 持续接收进度；轮询接口仅作为状态查询/排障补充。
 
 **认证：** `X-API-Auth` + 前台用户登录 + CSRF
 
@@ -572,12 +572,12 @@ data: {"status":"generating","total":14,"completed":3,"images":[...]}\n\n
 | `generating` | 生成中 | `total`, `completed`, `images[]` |
 | `completed` | 全部完成 | `result`（完整生成结果） |
 | `failed` | 失败 | `error` |
-| `timeout` | 超时无进展 | `error` |
 
 **连接行为：**
-- 空闲超时：300 秒无事件自动断开
-- 终态断开：收到 `completed`/`failed`/`error`/`timeout` 后自动结束流
-- 客户端应实现 `EventSource` 自动重连
+- 连接建立时先收到当前任务快照；如果任务已完成，客户端会立即拿到 `completed` 结果
+- 空闲保活：长时间无进展时服务端会发送 SSE keep-alive comment，连接保持打开
+- 终态断开：收到 `completed`/`failed`/`error` 后自动结束流
+- 客户端应持续自动重连，直到收到后端终态或确认会话过期
 
 **使用示例（JavaScript）：**
 ```javascript

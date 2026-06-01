@@ -1,5 +1,65 @@
 ﻿# Agent Update Log
 
+## 2026-06-01 — 延长图片生成轮询与 SSE 保活
+
+### 任务目标
+
+图片生成耗时可能明显长于数分钟，前端不能在后端仍在等待 Apimart 任务时自行放弃。任务应由后端终态驱动：拿到图片、上游明确失败、认证/额度等致命错误，或达到可配置的服务端总超时。
+
+### 实现方案
+
+1. `backend/main.py` 将单图和批量轮询从固定轮数改为 `APIMART_POLL_TIMEOUT_SECONDS` 控制的长轮询，默认 3600 秒。
+2. 批量轮询不再因“若干轮没有完成新图片”提前终止；只要任务未终态就继续查询并发送心跳。
+3. `backend/sse.py` 空闲时发送 SSE keep-alive comment，不再把 SSE 空闲当成任务 `timeout` 终态。
+4. `GET /api/generate/status/{task_id}/stream` 连接建立时先发送当前任务快照，断线重连也能补到已完成结果。
+5. `src/lib/use-sse.ts` 去掉 3 次重连后失败的前端判死逻辑，改为持续指数退避重连；只有后端终态或会话过期才结束。
+
+### 变更文件
+
+| 文件 | 说明 |
+|---|---|
+| `backend/main.py` | 长轮询配置、心跳、SSE 初始快照 |
+| `backend/sse.py` | 空闲 keep-alive，不再发送 timeout 终态 |
+| `src/lib/use-sse.ts` | 前端持续重连，等待后端终态 |
+| `src/app/page.tsx` | 记录 heartbeat 中 processing/waiting 数量 |
+| `.env.example`, `backend/.env.example` | 新增轮询保活配置 |
+| `docs/agent-update-log.md` | 记录本次修复 |
+
+---
+
+## 2026-06-01 — 修复 Apimart task 查询误用 API Key 导致有效 Key 被禁用
+
+### 任务目标
+
+解决前端提交图片生成后短时间返回 502、后台提示 API Key 鉴权失败并自动禁用，但 Apimart 侧实际已经产图的问题。
+
+### 问题根因
+
+批量生成时每张图的提交请求会通过多 Key 轮询使用不同 API Key；但后续 `GET /tasks/{task_id}` 查询没有绑定创建该 task 的 Key，而是再次轮询取“下一个 Key”。如果 Apimart 的 task 查询按 Key/账号隔离，用 B Key 查询 A Key 创建的 task 会返回 401/403，旧逻辑随后把 B Key 记为鉴权失败，连续轮询后会把有效 Key 自动禁用。
+
+### 实现方案
+
+1. `_apimart_request` 支持返回本次实际使用的 API Key，并支持显式指定查询 Key。
+2. `apimart_generate` / `_submit_task` 在提交成功时记录 `task_id -> api_key`。
+3. `_query_single_task` 固定使用创建该 task 的 Key 查询，并且任务查询阶段的 401/403 不再计入 Key 鉴权失败。
+4. 同一次请求内，同一把 Key 的 401/403 最多计一次失败，并且鉴权失败切换时只选择本次尚未尝试过的 Key。
+5. 新增 `backend/apimart_key_binding_regression.py` 回归测试，覆盖单图和批量任务的 Key 绑定。
+
+### 变更文件
+
+| 文件 | 说明 |
+|---|---|
+| `backend/main.py` | 绑定 task 查询所用 Key，避免轮询查询误伤有效 Key |
+| `backend/apimart_key_binding_regression.py` | 新增 Apimart task/key 归属回归测试 |
+| `docs/agent-update-log.md` | 记录本次修复 |
+
+### 检查项
+
+- [x] Python 语法检查
+- [x] Apimart Key 绑定回归测试
+
+---
+
 ## 2026-05-27 — 修复 API Key 管理：精确错误消息 + 鉴权失败自动禁用
 
 ### 任务目标

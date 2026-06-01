@@ -7,8 +7,8 @@ type SSEHandler = {
   onOpen?: () => void;
 };
 
-const MAX_RECONNECT = 3;
-const RECONNECT_INTERVAL = 5000;
+const RECONNECT_BASE_DELAY = 2000;
+const RECONNECT_MAX_DELAY = 30000;
 
 export function useSSE(taskId: string | null, handlers: SSEHandler) {
   const handlersRef = useRef(handlers);
@@ -22,8 +22,41 @@ export function useSSE(taskId: string | null, handlers: SSEHandler) {
 
     let reconnectCount = 0;
     let closed = false;
-    let timeoutId: ReturnType<typeof setTimeout>;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
     let currentSource: EventSource | null = null;
+
+    const clearReconnectTimer = () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+    };
+
+    const scheduleReconnect = () => {
+      if (closed) return;
+      reconnectCount += 1;
+      const delay = Math.min(
+        RECONNECT_BASE_DELAY * Math.pow(2, Math.min(reconnectCount - 1, 4)),
+        RECONNECT_MAX_DELAY,
+      );
+      console.warn(`SSE disconnected, reconnecting in ${Math.round(delay / 1000)}s...`);
+      clearReconnectTimer();
+      timeoutId = setTimeout(connect, delay);
+    };
+
+    const checkSession = async (): Promise<boolean> => {
+      try {
+        const res = await fetch("/api/auth/me", { credentials: "include" });
+        if (res.status === 401) return false;
+        if (!res.ok) return true;
+        const data = await res.json().catch(() => null);
+        return Boolean(data?.user);
+      } catch {
+        // Network checks can fail during the same transient outage that closed SSE.
+        // Keep the generation attached and let the next reconnect recover.
+        return true;
+      }
+    };
 
     function connect() {
       if (closed) return;
@@ -66,47 +99,15 @@ export function useSSE(taskId: string | null, handlers: SSEHandler) {
 
         if (closed) return;
 
-        // Check HTTP status from the event source state
-        if (source.readyState === EventSource.CLOSED) {
-          // Connection was closed by server — check session status
-          fetch("/api/auth/me", { credentials: "include" })
-            .then((res) => {
-              if (res.status === 401) {
-                handlersRef.current.onError?.("会话已过期，请重新登录");
-                closed = true;
-                return;
-              }
-              return res.json();
-            })
-            .then((data) => {
-              if (!closed && data && !data?.user) {
-                handlersRef.current.onError?.("会话已过期，请重新登录");
-                closed = true;
-              } else if (!closed) {
-                if (reconnectCount < MAX_RECONNECT) {
-                  reconnectCount++;
-                  console.warn(`SSE disconnected, reconnecting (${reconnectCount}/${MAX_RECONNECT})...`);
-                  timeoutId = setTimeout(connect, RECONNECT_INTERVAL);
-                } else {
-                  handlersRef.current.onError?.("Connection lost after retries");
-                  closed = true;
-                }
-              }
-            })
-            .catch(() => {
-              if (!closed) {
-                handlersRef.current.onError?.("Connection lost after retries");
-                closed = true;
-              }
-            });
-        } else if (reconnectCount < MAX_RECONNECT) {
-          reconnectCount++;
-          console.warn(`SSE disconnected, reconnecting (${reconnectCount}/${MAX_RECONNECT})...`);
-          timeoutId = setTimeout(connect, RECONNECT_INTERVAL);
-        } else {
-          handlersRef.current.onError?.("Connection lost after retries");
-          closed = true;
-        }
+        void checkSession().then((sessionOk) => {
+          if (closed) return;
+          if (!sessionOk) {
+            handlersRef.current.onError?.("会话已过期，请重新登录");
+            closed = true;
+            return;
+          }
+          scheduleReconnect();
+        });
       };
     }
 
@@ -114,7 +115,7 @@ export function useSSE(taskId: string | null, handlers: SSEHandler) {
 
     return () => {
       closed = true;
-      clearTimeout(timeoutId);
+      clearReconnectTimer();
       currentSource?.close();
       currentSource = null;
     };

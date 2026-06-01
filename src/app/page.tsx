@@ -362,11 +362,22 @@ export default function HomePage() {
       setCompletedCount(completed);
       const realPercent = Math.round((completed / total) * 100);
       setProgressPercent((prev) => Math.max(prev, realPercent));
+
+      // 心跳事件：后端仍在工作，记录日志
+      if (d.heartbeat === true) {
+        const processingCount = typeof d.processing_count === "number" ? d.processing_count : 0;
+        const waitingCount = typeof d.waiting_count === "number" ? d.waiting_count : 0;
+        logger.log(`[SSE] Heartbeat: ${processingCount} processing, ${waitingCount} waiting`);
+      }
     },
     onComplete: (data: unknown) => {
       const d = data as Record<string, unknown>;
       const result = d.result as Record<string, unknown> | undefined;
       const r = result?.data as Record<string, unknown> | undefined;
+      const isPartial = d.partial === true;
+      const successCount = typeof d.success_count === "number" ? d.success_count : 0;
+      const totalCount = typeof d.total_count === "number" ? d.total_count : TOTAL_GENERATION_IMAGES;
+
       if (r) {
         const mainImages = normalizeImageSlots(r.mainImages);
         const modelImages = normalizeImageUrls(r.modelImages);
@@ -389,6 +400,14 @@ export default function HomePage() {
         if (isNonEmptyImageUrl(r.comparisonImage)) setComparisonImage(r.comparisonImage);
         if (isNonEmptyImageUrl(r.detailImage)) setDetailImage(r.detailImage);
       }
+
+      // 部分完成时显示警告提示
+      if (isPartial) {
+        toast.warning(
+          `部分生成完成：${successCount}/${totalCount} 张图片成功，其余重试可恢复`
+        );
+      }
+
       setGenerationStatus("completed");
       setSimulatedProgressActive(false);
       setProgressPercent(100);
@@ -459,10 +478,15 @@ export default function HomePage() {
   };
 
   const handleLogout = async () => {
-    await fetch("/api/auth/logout", {
-      method: "POST",
-      headers: { "X-CSRF-Token": csrfToken },
-    });
+    try {
+      const currentCsrfToken = await refreshCsrfToken();
+      await fetch("/api/auth/logout", {
+        method: "POST",
+        headers: { "X-CSRF-Token": currentCsrfToken },
+      });
+    } catch (e) {
+      logger.error("Logout request failed:", e);
+    }
     setUser(null);
     setWallet(null);
     setCsrfToken("");
@@ -523,18 +547,24 @@ export default function HomePage() {
 
   const createRechargeOrder = async (packageId: number) => {
     if (!csrfToken) return;
-    const res = await fetch("/api/user/orders", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
-      body: JSON.stringify({ package_id: packageId }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      toast.error(String(data.detail || "创建订单失败"));
-      return;
+    try {
+      const currentCsrfToken = await refreshCsrfToken();
+      const res = await fetch("/api/user/orders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": currentCsrfToken },
+        body: JSON.stringify({ package_id: packageId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast.error(String(data.detail || "创建订单失败"));
+        return;
+      }
+      toast.success(`订单 ${data.order?.order_no || ""} 已创建，等待支付接入`);
+      await loadBilling();
+    } catch (error) {
+      logger.error("Create order failed:", error);
+      toast.error("创建订单失败，请重试");
     }
-    toast.success(`订单 ${data.order?.order_no || ""} 已创建，等待支付接入`);
-    await loadBilling();
   };
 
   const readImageFile = (file: File | null) => {
@@ -576,6 +606,21 @@ export default function HomePage() {
     }
   };
 
+  const refreshCsrfToken = async (): Promise<string> => {
+    try {
+      const res = await fetch("/api/auth/me");
+      if (res.ok) {
+        const data = await res.json();
+        const newToken = data.csrf_token || "";
+        setCsrfToken(newToken);
+        return newToken;
+      }
+    } catch (e) {
+      logger.error("Failed to refresh CSRF token:", e);
+    }
+    return csrfToken;
+  };
+
   const handleGenerate = async () => {
     if (!user) {
       setAuthMode("login");
@@ -613,10 +658,13 @@ export default function HomePage() {
     setIsLoading(true);
 
     try {
+      // 刷新 CSRF token 确保有效性
+      const currentCsrfToken = await refreshCsrfToken();
+
       // 1. 提交异步任务
       const startRes = await fetchWithRetry("/api/generate/async", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": currentCsrfToken },
         body: JSON.stringify({
           image_url: uploadedImage,
           product_type: getEffectiveProductType(),
@@ -667,9 +715,10 @@ export default function HomePage() {
     setIsTesting(true);
 
     try {
+      const currentCsrfToken = await refreshCsrfToken();
       const res = await fetchWithRetry("/api/generate", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": currentCsrfToken },
         body: JSON.stringify({
           image_url: uploadedImage,
           product_type: getEffectiveProductType(),
@@ -723,9 +772,10 @@ export default function HomePage() {
     setIsLoading(true);
 
     try {
+      const currentCsrfToken = await refreshCsrfToken();
       const res = await fetchWithRetry("/api/generate", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": currentCsrfToken },
         body: JSON.stringify({
           image_url: uploadedImage,
           product_type: getEffectiveProductType(),
