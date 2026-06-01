@@ -647,7 +647,6 @@ def build_fashion_prompt(
     index: int,
     product_type: str,
     country: str,
-    model_code: str,
     category: dict,
     scene_pool_override: list | None = None,
     pose_pool_override: list | None = None,
@@ -656,78 +655,62 @@ def build_fashion_prompt(
     shot_type_override: str | None = None,
 ) -> dict:
     product_type = sanitize_prompt_input(product_type)
-    """
-    构建电商商品图 prompt - 核心生成引擎
-    根据品类、市场、模型三个维度动态优化
-    scene_pool_override/pose_pool_override 由 LLM 提供，非空时覆盖模板默认值
-    """
     country_cfg = COUNTRY_CONFIG.get(country, COUNTRY_CONFIG["usa"])
-    model_profile = get_model_profile(model_code)
     shot_type = shot_type_override or category.get("shot_type", "product")
-
-    # 品类专属的拍摄方式
     composition_guide = composition_override or category.get("composition", "专业商品展示")
-    if shot_type == "product":
-        composition_guide = "product-only commercial image, no human model, clear product focus"
 
-    # 场景选择
     scene_pool = scene_pool_override or category.get("scene_pool", ["专业产品摄影场景"])
     scene = scene_pool[index % len(scene_pool)]
 
-    # 模特方案
-    model_part = ""
     if shot_type == "model":
-        pose_pool = pose_pool_override or category.get("model_pose_pool", ["自然站立展示"])
+        pose_pool = pose_pool_override or category.get("model_pose_pool", ["自然站立展示商品正面"])
+        if not pose_pool:
+            pose_pool = ["自然站立展示商品正面"]
         pose = pose_pool[index % len(pose_pool)]
-        style_extra = f"\nSTYLE NOTE: {style_keywords_override}" if style_keywords_override else ""
-        model_part = f"""
-MODEL: {country_cfg['model_desc']}
-POSE: {pose}
-STYLING: {country_cfg['style_preference']}{style_extra}"""
+        style_extra = f"\n风格补充：{style_keywords_override}" if style_keywords_override else ""
+        prompt = f"""拍摄一张用于{country_cfg['platform']}店铺的专业电商模特图。
 
-    product_negative = "\n- NO human model, NO person, NO body parts, NO hands holding or wearing the product" if shot_type == "product" else ""
+商品：{product_type}（{category['name']}）
 
-    # 组装 prompt
-    prompt = f"""PROFESSIONAL E-COMMERCE PRODUCT PHOTOGRAPHY - {country_cfg['platform']} LISTING
+模特要求：{country_cfg['model_desc']}
+模特姿势：{pose}
+穿搭风格：{country_cfg['style_preference']}{style_extra}
 
-PRODUCT FOCUS: {product_type}
-SHOT TYPE: {shot_type.upper()} SHOT - {composition_guide}
+场景：{scene}
 
-CATEGORY: {category['name']}
+拍摄要求：
+- 商业摄影级别，商品在画面中心清晰可见
+- 模特展示商品的实际使用/佩戴效果
+- {composition_guide}
 
-{model_part}
+禁止元素：
+- 禁止文字、水印、Logo、价格标签
+- 禁止二维码、条形码、网址
+- 禁止AI生成痕迹和图像失真
+- 禁止低分辨率、模糊、噪点
+- 禁止不适当的非商业内容"""
+    else:
+        prompt = f"""拍摄一张用于{country_cfg['platform']}店铺的专业电商商品图。
 
-SCENE & BACKGROUND: {scene}
-COMPOSITION: Professional e-commerce composition, product clearly visible and centered, commercial layout
+商品：{product_type}（{category['name']}）
 
-VISUAL QUALITY: {model_profile['quality']}
-STYLE DIRECTION: {model_profile['style']}
-LIGHTING SETUP: {model_profile['lighting']}
-CAMERA & LENS: {model_profile['camera']}
-COLOR TREATMENT: {model_profile['color_grade']}
+场景：{scene}
 
-PHOTOGRAPHY STANDARD:
-- 8K ultra high resolution, every texture and detail crystal clear
-- Professional commercial photography for {country_cfg['platform']}
-- Shoppable content ready, social media optimized, engagement-driven
-- Product appears identical to the reference image in style, color, and design
+拍摄要求：
+- 产品专属展示，无人类模特
+- 商品居中，背景干净简洁
+- 商业摄影级别，高清晰度，细节清晰
 
-MARKET LOCALIZATION: {country_cfg['style_preference']}
-TARGET AUDIENCE: {country_cfg['name']} consumers, {country_cfg['platform']} shoppers
-
-NEGATIVE CONSTRAINTS - ABSOLUTELY DO NOT INCLUDE:
-- NO text, watermark, logo, brand name, price tag, or promotional overlay
-- NO QR codes, barcodes, or website URLs
-- NO AI/ML watermarks, generation artifacts, or distortion
-- NO poorly rendered hands, faces, or anatomical errors
-- NO low resolution, blur, noise, or compression artifacts
-- NO inappropriate, unsafe, or non-commercial content
-- NO borders, frames, collages, or composite layouts
-- NO text characters in any language on the image{product_negative}"""
+禁止元素：
+- 禁止文字、水印、Logo、价格标签
+- 禁止二维码、条形码、网址
+- 禁止人物出现，仅展示商品
+- 禁止AI生成痕迹和图像失真
+- 禁止低分辨率、模糊、噪点
+- 禁止不适当的非商业内容"""
 
     return {
         "prompt": prompt,
-        "model": model_code,
         "category": category["name"],
         "shot_type": shot_type,
     }
@@ -736,85 +719,62 @@ NEGATIVE CONSTRAINTS - ABSOLUTELY DO NOT INCLUDE:
 def build_comparison_prompt(product_type: str, category: dict) -> str:
     """竞品对比图 prompt"""
     product_type = sanitize_prompt_input(product_type)
-    return f"""E-COMMERCE A/B COMPARISON PHOTOGRAPHY
+    return f"""拍摄一张{product_type}（{category['name']}）的竞品对比图。
 
-LEFT SIDE — COMPETITOR PRODUCT (Inferior Version):
-- Plain white or cluttered background
-- Poor lighting, flat appearance, dull colors
-- Unstyled, no model, boring presentation
-- Looks like amateur phone photography
-- Unappealing, not click-worthy
+左侧（劣质竞品）：
+- 白色或杂乱背景，光线平淡，色彩暗淡
+- 无造型，业余手机摄影风格
 
-RIGHT SIDE — YOUR PREMIUM PRODUCT:
-- Professional model/styling showcasing the {category['name']}
-- Beautiful scene: {category.get('scene_pool', ['现代简约空间'])[0]}
-- Cinematic studio lighting, rich colors, premium feel
-- Dynamic composition, TikTok viral-worthy
-- High-end e-commerce quality
+右侧（优质商品）：
+- 专业造型展示，美丽场景背景
+- 电影级灯光，高端商业风格
 
-VISUAL SEPARATOR: Subtle gradient divider between left (bad) and right (good).
-
-8K ULTRA REALISTIC. COMMERCIAL READY for TikTok Shop.
-NO TEXT. NO WATERMARKS. NO LABELS."""
+中间有细微分隔线。禁止文字、水印、标签。"""
 
 
 def build_white_comparison_prompt(product_type: str, category: dict) -> str:
     """白底图 + 对比图合成 prompt"""
     product_type = sanitize_prompt_input(product_type)
-    return f"""E-COMMERCE PRODUCT LISTING COMPOSITE PHOTOGRAPHY
+    return f"""拍摄一张{product_type}（{category['name']}）的对比展示图。
 
-SUBJECT: {product_type} ({category['name']})
+左侧：纯白背景产品展示，居中，高光线
+右侧：升级版电商展示，更丰富的灯光和角度
 
-CREATE ONE CLEAN COMPOSITE IMAGE WITH TWO CLEAR PRODUCT PRESENTATIONS:
-LEFT SIDE: premium product on a pure seamless white background, centered, high-key studio lighting.
-RIGHT SIDE: upgraded marketplace presentation of the same product with richer lighting, better angle, and more premium commercial styling.
+要求：
+- 同一产品，保持一致的颜色、材质和设计
+- 无人类模特，仅展示产品
+- 干净的对比布局，无文字标签
 
-REQUIREMENTS:
-- Same product identity, color, material, and design as the reference image
-- Product-only presentation, no human model, no person, no hands
-- Clean comparison layout with no text, labels, arrows, watermarks, logos, QR codes, or borders
-- Professional TikTok Shop listing quality, crisp product detail, realistic lighting
-
-8K ULTRA REALISTIC. COMMERCIAL READY."""
+禁止水印、Logo、二维码、边框。"""
 
 
 def build_detail_prompt(product_type: str, category: dict, detail_focus_override: str | None = None) -> str:
     """细节放大图 prompt"""
     product_type = sanitize_prompt_input(product_type)
-    detail_focus = detail_focus_override or category.get('detail_focus', 'Fabric texture, material quality, and craftsmanship')
-    return f"""EXTREME MACRO PRODUCT DETAIL PHOTOGRAPHY
+    detail_focus = detail_focus_override or category.get('detail_focus', '材质、做工、设计细节')
+    return f"""拍摄一张{product_type}（{category['name']}）的细节特写图。
 
-SUBJECT: {product_type} ({category['name']})
-SHOT: Ultra close-up macro photography revealing:
-- {detail_focus}
-- Every stitch, seam, and construction detail
-- Premium material texture and finish
-- Design elements that demonstrate quality
+需要展示的细节：{detail_focus}
 
-LIGHTING: Professional macro lighting with soft directional shadows that reveal texture depth and material dimensionality.
+拍摄要求：
+- 微距特写，清晰展示材质纹理和做工细节
+- 专业微距摄影级别，边缘清晰
+- 中性背景，不干扰商品展示
 
-FOCUS: Crystal clear edge-to-edge macro sharpness, every fiber/grain/texture visible.
-BACKGROUND: Clean, neutral background that doesn't distract from the product detail.
-
-8K MACRO RESOLUTION. Professional macro lens quality.
-PERFECT for TikTok Shop detail pages and quality demonstration.
-NO TEXT. NO WATERMARK. NO LOGO."""
+禁止文字、水印、Logo。"""
 
 
 def build_white_bg_prompt(product_type: str, category: dict) -> str:
     """白底展示图 prompt"""
     product_type = sanitize_prompt_input(product_type)
-    return f"""PROFESSIONAL E-COMMERCE PRODUCT PHOTOGRAPHY
+    return f"""拍摄一张{product_type}（{category['name']}）的白底商品图。
 
-SUBJECT: {product_type}
-BACKGROUND: Pure seamless white (#FFFFFF), infinite white backdrop
-LIGHTING: High-key studio lighting, soft even illumination, no harsh shadows
-COMPOSITION: Product centered, clean commercial layout, front-facing angle
-QUALITY: 8K resolution, every detail crystal clear, professional product shot
-PURPOSE: Main product listing image for {category.get('parent', 'e-commerce')} marketplace
+要求：
+- 纯白色背景（#FFFFFF），无限白色背景
+- 产品居中，干净整洁，无阴影
+- 高清晰度，商业摄影级别
 
-ABSOLUTELY NO TEXT, WATERMARK, LOGO, OR DECORATIVE ELEMENTS.
-MINIMALIST COMMERCIAL PRODUCT PHOTOGRAPHY."""
+禁止文字、水印、Logo、装饰元素。"""
 
 
 # ============================================================
@@ -912,7 +872,7 @@ def generate_all_tasks(
     for i in range(9):
         shot_type = "model" if i < model_image_count else "product"
         result = build_fashion_prompt(
-            i, product_type, country, model_code, category,
+            i, product_type, country, category,
             scene_pool_override=scene_pool if has_llm_scenes else None,
             pose_pool_override=pose_pool if has_llm_poses else None,
             style_keywords_override=llm_style_keywords,
