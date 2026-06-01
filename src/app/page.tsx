@@ -44,6 +44,20 @@ interface UserHistoryItem {
   status: string;
 }
 
+interface HistoryDetailItem {
+  id: number;
+  created_at: string;
+  product_type: string;
+  description_snapshot: string;
+  preview_images: string[];
+  all_images_json: string[];
+  titles_json: string[];
+  tags_json: string[];
+  target_audience: string;
+  status: string;
+  charge_points: number;
+}
+
 interface LedgerItem {
   id: number;
   type: string;
@@ -232,7 +246,6 @@ export default function HomePage() {
   const [totalCount, setTotalCount] = useState(TOTAL_GENERATION_IMAGES);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [generationStatus, setGenerationStatus] = useState<string>("idle");
-  const [latestImage, setLatestImage] = useState<string | null>(null);
   const [currentTaskId, setCurrentTaskId] = useState<string | null>(null);
   const [simulatedProgressActive, setSimulatedProgressActive] = useState<boolean>(false);
   const [user, setUser] = useState<UserProfile | null>(null);
@@ -245,6 +258,9 @@ export default function HomePage() {
   const [authLoading, setAuthLoading] = useState(false);
   const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [historyItems, setHistoryItems] = useState<UserHistoryItem[]>([]);
+  const [showDetailModal, setShowDetailModal] = useState(false);
+  const [detailItem, setDetailItem] = useState<HistoryDetailItem | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [showBillingModal, setShowBillingModal] = useState(false);
   const [packages, setPackages] = useState<CreditPackage[]>([]);
   const [ledgerItems, setLedgerItems] = useState<LedgerItem[]>([]);
@@ -294,14 +310,14 @@ export default function HomePage() {
     return () => clearInterval(interval);
   }, [generationStatus]);
 
-  // 模拟进度 - 每3-5秒递增3-7%，上限90%
+  // 模拟进度 - 每3-5秒递增1-5%，上限90%
   useEffect(() => {
     if (!simulatedProgressActive || generationStatus !== "generating") return;
     let timeoutId: ReturnType<typeof setTimeout>;
     const tick = () => {
       setProgressPercent((prev) => {
         if (prev >= 90) return prev;
-        return Math.min(prev + Math.floor(Math.random() * 5) + 3, 90);
+        return Math.min(prev + Math.floor(Math.random() * 5) + 1, 90);
       });
       timeoutId = setTimeout(tick, Math.floor(Math.random() * 2000) + 3000);
     };
@@ -317,15 +333,6 @@ export default function HomePage() {
       setCompletedCount(completed);
       const realPercent = Math.round((completed / total) * 100);
       setProgressPercent((prev) => Math.max(prev, realPercent));
-      const images = Array.isArray(d.images) ? d.images as Array<Record<string, unknown>> : null;
-      if (images) {
-        const lastCompleted = images.findLast(
-          (img) => img.status === "completed" && img.url
-        );
-        if (lastCompleted) {
-          setLatestImage(String(lastCompleted.url));
-        }
-      }
     },
     onComplete: (data: unknown) => {
       const d = data as Record<string, unknown>;
@@ -436,6 +443,22 @@ export default function HomePage() {
     const data = await res.json();
     setHistoryItems(data.items || []);
     setShowHistoryModal(true);
+  };
+
+  const loadHistoryDetail = async (historyId: number) => {
+    setDetailLoading(true);
+    try {
+      const res = await fetch(`/api/user/history/${historyId}`);
+      if (!res.ok) {
+        toast.error("加载详情失败");
+        return;
+      }
+      const data = await res.json();
+      setDetailItem(data.item);
+      setShowDetailModal(true);
+    } finally {
+      setDetailLoading(false);
+    }
   };
 
   const loadBilling = async () => {
@@ -551,7 +574,6 @@ export default function HomePage() {
     setCompletedCount(0);
     setTotalCount(TOTAL_GENERATION_IMAGES);
     setElapsedSeconds(0);
-    setLatestImage(null);
     setGenerationStatus("submitting");
     setIsLoading(true);
 
@@ -651,7 +673,7 @@ export default function HomePage() {
     }
     if (!uploadedImage) return;
 
-    if ((wallet?.balance || 0) < generationCostPoints) {
+    if ((wallet?.balance || 0) < 2) {
       loadBilling().catch((e) => logger.error("Failed to load billing:", e));
       toast.warning("积分不足，请先充值");
       return;
@@ -676,6 +698,7 @@ export default function HomePage() {
           model_image_count: generatedModelImageCount,
           generate_type: "test",
           style_index: styleIndex,
+          charge_points: 2,
         }),
       });
 
@@ -688,12 +711,13 @@ export default function HomePage() {
         });
         refreshWallet().catch((e) => logger.error("Failed to refresh wallet:", e));
       } else {
-        toast.error(`单图生成失败: ${data.detail || data.error || "未知错误"}`);
+        toast.error(`单图重试失败: ${data.detail || data.error || "未知错误"}`);
         refreshWallet().catch((e) => logger.error("Failed to refresh wallet:", e));
       }
     } catch (error) {
-      logger.error("单图生成失败:", error);
-      toast.error("单图生成失败，请重试");
+      logger.error("单图重试失败:", error);
+      toast.error("单图重试失败，请重试");
+      refreshWallet().catch((e) => logger.error("Failed to refresh wallet:", e));
     } finally {
       setIsLoading(false);
     }
@@ -1111,7 +1135,7 @@ export default function HomePage() {
               </div>
               <div className="flex flex-wrap gap-1.5">
                 {testTags.map((t, i) => (
-                  <span key={i} className="px-2.5 py-1 bg-pink-600/40 text-white/90 text-xs rounded-full">#{t}</span>
+                  <span key={i} className="px-2.5 py-1 bg-pink-600/40 text-white/90 text-xs rounded-full">{t}</span>
                 ))}
               </div>
             </div>
@@ -1202,23 +1226,6 @@ export default function HomePage() {
                   </span>
                   <span>{progressPercent}%</span>
                 </div>
-                {/* 最新完成的图片缩略图 */}
-                {latestImage && (
-                  <div className="flex justify-center">
-                    <div className="relative w-16 h-16 rounded-lg overflow-hidden border-2 border-purple-400/50 animate-in fade-in zoom-in">
-                      <img
-                        src={proxyImg(latestImage)}
-                        alt="最新生成"
-                        className="w-full h-full object-cover"
-                        loading="lazy"
-                        decoding="async"
-                      />
-                      <div className="absolute inset-0 bg-gradient-to-t from-black/40 to-transparent flex items-end justify-center">
-                        <span className="text-[8px] text-white pb-0.5">完成!</span>
-                      </div>
-                    </div>
-                  </div>
-                )}
               </div>
             ) : (
               `🚀 一键生成：9张主图 + 2张辅助图`
@@ -1270,15 +1277,15 @@ export default function HomePage() {
                       {copiedIndex === index ? "✓" : "📷"}
                     </button>
                   </div>
-                  {/* 单图测试按钮 */}
+                  {/* 单图重试按钮 */}
                   <div className="absolute top-1 left-1 z-10 opacity-0 group-hover:opacity-100 transition-opacity">
                     <button
                       onClick={(e) => { e.stopPropagation(); handleSingleImageTest(index); }}
                       disabled={isLoading || !imgUrl}
                       className="p-1.5 bg-orange-500/70 hover:bg-orange-500 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-md text-white text-xs transition-all"
-                      title="单图测试"
+                      title="单图重试"
                     >
-                      🔬
+                      🔄
                     </button>
                   </div>
                 </div>
@@ -1335,14 +1342,13 @@ export default function HomePage() {
                     {generatedTags.map((tag, index) => (
                       <button
                         key={index}
-                        onClick={() => copyToClipboard(`#${tag}`, index + 10)}
+                        onClick={() => copyToClipboard(`${tag}`, index + 10)}
                         className={`group relative px-4 py-2 rounded-full text-sm font-medium transition-all ${
                           copiedTitleIndex === index + 10
                             ? "bg-green-500/80 text-white"
                             : "bg-gradient-to-r from-pink-600/60 to-purple-600/60 hover:from-pink-500 hover:to-purple-500 text-white shadow-lg shadow-pink-500/20"
                         }`}
                       >
-                        <span className="font-bold text-amber-300">#</span>
                         <span>{tag}</span>
                         <span className={`ml-2 text-xs ${copiedTitleIndex === index + 10 ? "text-green-200" : "text-white/40 group-hover:text-white/70"}`}>
                           {copiedTitleIndex === index + 10 ? "✓" : "📋"}
@@ -1507,14 +1513,13 @@ export default function HomePage() {
             {generatedTags.map((tag, index) => (
               <button
                 key={index}
-                onClick={() => copyToClipboard(`#${tag}`, index + 10)}
+                onClick={() => copyToClipboard(`${tag}`, index + 10)}
                 className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
                   copiedTitleIndex === index + 10
                     ? "bg-green-500 text-white"
                     : "bg-gradient-to-r from-pink-600/60 to-purple-600/60 hover:from-pink-500 hover:to-purple-500 text-white shadow-lg shadow-pink-500/20"
                 }`}
               >
-                <span className="font-bold text-amber-300">#</span>
                 {tag}
               </button>
             ))}
@@ -1631,7 +1636,7 @@ export default function HomePage() {
       >
         <div className="space-y-3">
           {historyItems.map((item) => (
-            <div key={item.id} className="grid grid-cols-1 md:grid-cols-[1.1fr_1fr_1.6fr_1.4fr] gap-4 items-center bg-white/5 border border-white/10 rounded-lg p-4">
+            <div key={item.id} className="grid grid-cols-1 md:grid-cols-[1.1fr_1fr_1.6fr_1.4fr_auto] gap-4 items-center bg-white/5 border border-white/10 rounded-lg p-4">
               <div className="text-white/80 text-sm">{item.created_at?.replace("T", " ").slice(0, 19)}</div>
               <div className="text-white font-medium">{item.product_type || "-"}</div>
               <div className="text-white/70 text-sm line-clamp-2">{item.description_snapshot || ""}</div>
@@ -1647,12 +1652,140 @@ export default function HomePage() {
                   />
                 ))}
               </div>
+              <button
+                onClick={() => loadHistoryDetail(item.id)}
+                disabled={detailLoading}
+                className="px-3 py-1.5 bg-purple-500/70 hover:bg-purple-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-white text-xs rounded-lg transition-all whitespace-nowrap"
+              >
+                详情
+              </button>
             </div>
           ))}
           {historyItems.length === 0 && (
             <div className="py-10 text-center text-white/50">暂无生成历史</div>
           )}
         </div>
+      </Modal>
+
+      {/* 历史记录详情弹窗 */}
+      <Modal
+        open={showDetailModal}
+        title="生成详情"
+        onClose={() => { setShowDetailModal(false); setDetailItem(null); }}
+        containerClassName="w-full max-w-3xl"
+      >
+        {detailLoading ? (
+          <div className="py-10 text-center text-white/50">加载中...</div>
+        ) : detailItem ? (
+          <div className="space-y-6">
+            {/* 元信息 */}
+            <div className="flex flex-wrap gap-4 text-sm text-white/60">
+              <span>{detailItem.created_at?.replace("T", " ").slice(0, 19)}</span>
+              <span>{detailItem.product_type || "-"}</span>
+              <span className={detailItem.status === "completed" ? "text-green-400" : "text-red-400"}>
+                {detailItem.status === "completed" ? "已完成" : "失败"}
+              </span>
+            </div>
+
+            {/* 描述 */}
+            {detailItem.description_snapshot && (
+              <div>
+                <h4 className="text-white font-medium mb-2 flex items-center gap-2">
+                  <span>📝</span> 描述
+                </h4>
+                <p className="text-white/70 text-sm bg-white/5 rounded-lg p-3">{detailItem.description_snapshot}</p>
+              </div>
+            )}
+
+            {/* 适用人群 */}
+            {detailItem.target_audience && (
+              <div className="p-4 bg-gradient-to-r from-green-500/20 to-blue-500/20 rounded-lg border border-green-500/30">
+                <h4 className="text-white font-medium mb-1 flex items-center gap-2">
+                  <span>👥</span> 适用人群
+                </h4>
+                <p className="text-green-300 font-medium">{detailItem.target_audience}</p>
+              </div>
+            )}
+
+            {/* 生成图片 */}
+            {(() => {
+              const detailImages = (detailItem.all_images_json || []).length > 0
+                ? detailItem.all_images_json
+                : (detailItem.preview_images || []);
+              return detailImages.length > 0 && (
+                <div>
+                  <h4 className="text-white font-medium mb-3 flex items-center gap-2">
+                    <span>🖼️</span> 生成图片
+                  </h4>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    {detailImages.map((url: string, i: number) => (
+                      <img
+                        key={i}
+                        src={proxyImg(url)}
+                        alt={`图片 ${i + 1}`}
+                        className="w-full h-40 object-cover rounded-lg border border-white/10 cursor-pointer hover:border-purple-500 transition-all"
+                        onClick={() => setLightboxUrl(url)}
+                        loading="lazy"
+                        decoding="async"
+                      />
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* 爆款标题 */}
+            {(detailItem.titles_json || []).length > 0 && (
+              <div>
+                <h4 className="text-white font-medium mb-3 flex items-center gap-2">
+                  <span>🔥</span> 爆款标题
+                </h4>
+                <div className="space-y-2">
+                  {detailItem.titles_json.map((title: string, index: number) => (
+                    <div key={index} className="flex items-center gap-2 p-3 bg-white/5 rounded-lg">
+                      <span className="text-white/60 text-sm">{index + 1}.</span>
+                      <span className="flex-1 text-white text-sm">{title}</span>
+                      <button
+                        onClick={() => copyToClipboard(title, index)}
+                        className="px-3 py-1 bg-purple-500/50 hover:bg-purple-500 text-white text-sm rounded transition-all"
+                      >
+                        复制
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* 标签 */}
+            {(detailItem.tags_json || []).length > 0 && (
+              <div>
+                <h4 className="text-white font-medium mb-3 flex items-center gap-2">
+                  <span>🏷️</span> 标签
+                </h4>
+                <div className="flex flex-wrap gap-2">
+                  {detailItem.tags_json.map((tag: string, index: number) => (
+                    <button
+                      key={index}
+                      onClick={() => copyToClipboard(tag, index + 50)}
+                      className="px-4 py-2 rounded-full text-sm font-medium bg-gradient-to-r from-pink-600/60 to-purple-600/60 hover:from-pink-500 hover:to-purple-500 text-white transition-all"
+                    >
+                      {tag}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* 关闭按钮 */}
+            <button
+              onClick={() => { setShowDetailModal(false); setDetailItem(null); }}
+              className="w-full py-3 bg-white/10 hover:bg-white/20 text-white rounded-lg font-medium transition-all"
+            >
+              关闭
+            </button>
+          </div>
+        ) : null}
       </Modal>
 
       <Modal

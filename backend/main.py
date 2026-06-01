@@ -13,7 +13,7 @@ import time
 import os
 import sys
 import uuid
-from typing import Optional
+from typing import Literal, Optional
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -68,6 +68,8 @@ from database import (
     list_user_ledger, list_user_orders, mark_order_paid,
     upsert_credit_package, get_user, create_user, ensure_refund_once,
     mask_api_key, update_admin_password,
+    get_user_history_detail,
+    list_all_users, admin_create_user, update_user_status, update_user_note, delete_user,
 )
 from llm_provider import analyze as llm_analyze, build_llm_messages
 
@@ -355,6 +357,7 @@ class GenerateRequest(BaseModel):
     prompt_size: str = Field(default="auto", pattern=r"^(auto|1:1|4:3|3:4|16:9|9:16)$")
     prompt_resolution: str = Field(default="1k", pattern=r"^(1k|2k|4k)$")
     model_image_count: int = Field(default=4, ge=0, le=9)
+    charge_points: Optional[int] = Field(default=None, ge=1, le=10)
 
 
 class LoginRequest(BaseModel):
@@ -391,6 +394,26 @@ class CreateApiKeyRequest(BaseModel):
     key_value: str = Field(min_length=1, max_length=500)
     name: str = Field(default="", max_length=100)
     daily_limit: int = Field(default=200, ge=1, le=10000)
+
+
+class AdminCreateUserRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=50)
+    password: str = Field(min_length=12, max_length=128)
+    phone: str = Field(default="", max_length=30)
+    email: str = Field(default="", max_length=120)
+    note: str = Field(default="", max_length=500)
+
+
+class AdminChangePasswordRequest(BaseModel):
+    new_password: str = Field(min_length=1, max_length=128)
+
+
+class AdminUserStatusRequest(BaseModel):
+    status: Literal["active", "frozen"]
+
+
+class AdminUserNoteRequest(BaseModel):
+    note: str = Field(default="", max_length=500)
 
 
 # ========== 进度存储 ==========
@@ -886,6 +909,14 @@ async def user_history(user: dict = Depends(authenticate_customer)):
     return {"items": list_user_history(int(user["id"]))}
 
 
+@app.get("/user/history/{history_id}")
+async def user_history_detail(history_id: int, user: dict = Depends(authenticate_customer)):
+    item = get_user_history_detail(int(user["id"]), history_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    return {"item": item}
+
+
 @app.post("/api/generate")
 @limiter.limit("10/minute")
 async def generate_images(
@@ -897,7 +928,7 @@ async def generate_images(
     start = time.time()
     task_id = str(uuid.uuid4())
     user_id = int(user["id"])
-    charge_points = get_generation_cost_points()
+    charge_points = req.charge_points if req.charge_points is not None else get_generation_cost_points()
     charge_state = {"charged": False, "refunded": False}
 
     try:
@@ -1004,7 +1035,11 @@ async def generate_images(
                         llm_request=llm_request_data, llm_response=llm_response_data,
                         tasks_detail=tasks_detail, charge_points=charge_points,
                         description_snapshot=sanitize_input(gen_result.get("description", req.product_type), 500),
-                        preview_images_json=_preview_images([url]))
+                        preview_images_json=_preview_images([url]),
+                        titles_json=json.dumps(gen_result.get("titles", []), ensure_ascii=False),
+                        tags_json=json.dumps(gen_result.get("tags", []), ensure_ascii=False),
+                        target_audience=gen_result.get("target_audience", ""),
+                        all_images_json=json.dumps([url], ensure_ascii=False))
             return {
                 "success": True,
                 "data": {
@@ -1049,7 +1084,11 @@ async def generate_images(
                     llm_request=llm_request_data, llm_response=llm_response_data,
                     tasks_detail=tasks_detail, charge_points=charge_points,
                     description_snapshot=sanitize_input(gen_result.get("description", req.product_type), 500),
-                    preview_images_json=_preview_images(model_images))
+                    preview_images_json=_preview_images(model_images),
+                    titles_json=json.dumps(gen_result.get("titles", []), ensure_ascii=False),
+                    tags_json=json.dumps(gen_result.get("tags", []), ensure_ascii=False),
+                    target_audience=gen_result.get("target_audience", ""),
+                    all_images_json=json.dumps(main_images, ensure_ascii=False))
         print(f"[DONE] Completed! Elapsed {elapsed:.1f}s")
 
         return {
@@ -1287,6 +1326,10 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
             charge_points=charge_points,
             description_snapshot=sanitize_input(gen_result.get("description", req.product_type), 500),
             preview_images_json=_preview_images(model_images),
+            titles_json=json.dumps(gen_result.get("titles", []), ensure_ascii=False),
+            tags_json=json.dumps(gen_result.get("tags", []), ensure_ascii=False),
+            target_audience=gen_result.get("target_audience", ""),
+            all_images_json=json.dumps(main_images, ensure_ascii=False),
         )
 
     except Exception as e:
@@ -1331,7 +1374,7 @@ async def generate_async(
     client_ip = request.client.host if request.client else "unknown"
     task_id = init_progress(TOTAL_GENERATION_IMAGES, creator_ip=client_ip)
     user_id = int(user["id"])
-    charge_points = get_generation_cost_points()
+    charge_points = req.charge_points if req.charge_points is not None else get_generation_cost_points()
     try:
         charge_generation(user_id, task_id, charge_points, f"生成任务 {task_id}")
     except ValueError:
@@ -1699,6 +1742,128 @@ async def admin_health(user: dict = Depends(authenticate)):
         "task_store_size": len(task_store),
         "keys_health": key_manager.health_check(),
     }
+
+
+# ========== 账号管理端点 ==========
+
+
+@app.get("/admin/users")
+@limiter.limit("30/minute")
+async def admin_list_users(request: Request, user: dict = Depends(authenticate)):
+    """获取所有用户列表"""
+    return {"users": list_all_users()}
+
+
+@app.post("/admin/users")
+@limiter.limit("20/minute")
+async def admin_create_user_endpoint(
+    request: Request,
+    req: AdminCreateUserRequest,
+    user: dict = Depends(authenticate),
+    _csrf=Depends(verify_csrf),
+):
+    """管理员创建新用户"""
+    username = sanitize_input(req.username, 50)
+    phone = sanitize_input(req.phone, 30)
+    email = sanitize_input(req.email, 120)
+    note = sanitize_input(req.note, 500)
+    try:
+        validate_password_strength(req.password)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        user_id = admin_create_user(username, hash_password(req.password), phone=phone, email=email, note=note)
+    except ValueError:
+        raise HTTPException(status_code=409, detail="用户名已存在")
+    return {"id": user_id, "username": username}
+
+
+@app.put("/admin/users/{user_id}/status")
+@limiter.limit("30/minute")
+async def admin_update_user_status(
+    request: Request,
+    user_id: int,
+    req: AdminUserStatusRequest,
+    user: dict = Depends(authenticate),
+    _csrf=Depends(verify_csrf),
+):
+    """冻结/解冻用户"""
+    # 防止管理员冻结/解冻自己
+    # 注意：管理员存在 users 表，get_customer_by_id 查 customers 表，
+    # 对管理员账号返回 None，此检查自然放行；对客户账号则正常拦截自冻操作。
+    from database import get_customer_by_id
+    admin_username = user.get("sub", "")
+    target = get_customer_by_id(user_id)
+    if target and target["username"] == admin_username:
+        raise HTTPException(status_code=400, detail="不能对自己的账号执行此操作")
+    ok = update_user_status(user_id, req.status)
+    if not ok:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    return {"message": "已更新", "status": req.status}
+
+
+@app.put("/admin/users/{user_id}/note")
+@limiter.limit("30/minute")
+async def admin_update_user_note(
+    request: Request,
+    user_id: int,
+    req: AdminUserNoteRequest,
+    user: dict = Depends(authenticate),
+    _csrf=Depends(verify_csrf),
+):
+    """更新用户备注"""
+    note = sanitize_input(req.note, 500)
+    ok = update_user_note(user_id, note)
+    if not ok:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    return {"message": "备注已更新"}
+
+
+@app.delete("/admin/users/{user_id}")
+@limiter.limit("20/minute")
+async def admin_delete_user_endpoint(
+    request: Request,
+    user_id: int,
+    user: dict = Depends(authenticate),
+    _csrf=Depends(verify_csrf),
+):
+    """删除用户"""
+    # 防止管理员删除自己
+    from database import get_customer_by_id
+    admin_username = user.get("sub", "")
+    target = get_customer_by_id(user_id)
+    if target and target["username"] == admin_username:
+        raise HTTPException(status_code=400, detail="不能删除自己的账号")
+    ok = delete_user(user_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    return {"message": "用户已删除"}
+
+
+@app.put("/admin/change-password")
+@limiter.limit("5/minute")
+async def admin_change_password(
+    request: Request,
+    req: AdminChangePasswordRequest,
+    user: dict = Depends(authenticate),
+    _csrf=Depends(verify_csrf),
+):
+    """管理员修改自己的密码"""
+    from database import revoke_jti
+    username = user.get("sub", "")
+    admin = get_user(username)
+    if not admin:
+        raise HTTPException(status_code=404, detail="管理员账号不存在")
+    if not req.new_password.strip():
+        raise HTTPException(status_code=400, detail="密码不能为空")
+    update_admin_password(username, hash_password(req.new_password))
+    # Revoke current token to force re-login
+    if user.get("jti"):
+        exp = user.get("exp", "")
+        revoke_jti(user["jti"], str(exp) if exp else "")
+    resp = JSONResponse(content={"message": "密码修改成功，请重新登录"})
+    resp.set_cookie(key="user_access_token", value="", httponly=True, samesite="lax", path="/", max_age=0, secure=COOKIE_SECURE)
+    return resp
 
 
 # ========== LLM 配置管理端点 ==========

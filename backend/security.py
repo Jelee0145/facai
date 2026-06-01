@@ -169,7 +169,11 @@ async def authenticate_customer(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
 
     user = get_customer_by_id(user_id)
-    if not user or user.get("status") != "active":
+    if not user:
+        raise HTTPException(status_code=401, detail="账号不可用")
+    if user.get("status") == "frozen":
+        raise HTTPException(status_code=403, detail="账户被冻结，请联系管理员")
+    if user.get("status") != "active":
         raise HTTPException(status_code=401, detail="账号不可用")
 
     return {
