@@ -37,6 +37,7 @@ def init_db():
             last_used_at TEXT,
             total_used INTEGER DEFAULT 0,
             fail_count INTEGER DEFAULT 0,
+            balance_usd REAL DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now')),
             updated_at TEXT DEFAULT (datetime('now'))
         );
@@ -177,6 +178,10 @@ def init_db():
         ("charge_points", "INTEGER DEFAULT 0"),
         ("description_snapshot", "TEXT DEFAULT ''"),
         ("preview_images_json", "TEXT DEFAULT ''"),
+        ("titles_json", "TEXT DEFAULT '[]'"),
+        ("tags_json", "TEXT DEFAULT '[]'"),
+        ("target_audience", "TEXT DEFAULT ''"),
+        ("all_images_json", "TEXT DEFAULT '[]'"),
     ]:
         if col_name not in existing_cols:
             db.execute(f"ALTER TABLE generation_history ADD COLUMN {col_name} {col_def}")
@@ -189,6 +194,10 @@ def init_db():
         db.execute("ALTER TABLE users ADD COLUMN locked_until TEXT")
     if "last_login" not in user_cols:
         db.execute("ALTER TABLE users ADD COLUMN last_login TEXT")
+    # Migration: add balance_usd to api_keys
+    key_cols = [r[1] for r in db.execute("PRAGMA table_info('api_keys')").fetchall()]
+    if "balance_usd" not in key_cols:
+        db.execute("ALTER TABLE api_keys ADD COLUMN balance_usd REAL DEFAULT 0")
     db.commit()
     db.executescript("""
         CREATE TABLE IF NOT EXISTS task_store (
@@ -225,6 +234,13 @@ def init_db():
             "INSERT INTO system_config (key, value, updated_at) VALUES (?, ?, datetime('now'))",
             ("generation_cost_points", "10"),
         )
+    # Migrations for existing databases
+    try:
+        db.execute("ALTER TABLE users ADD COLUMN note TEXT DEFAULT ''")
+        db.commit()
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
     # Create indexes for high-traffic queries (idempotent)
     db.executescript("""
         CREATE INDEX IF NOT EXISTS idx_history_user ON generation_history(user_id);
@@ -318,18 +334,29 @@ def add_key(key_value: str, name: str = "", daily_limit: int = 100) -> int:
 
 
 def update_key(key_id: int, **kwargs) -> bool:
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"[BALANCE] update_key called with key_id={key_id}, kwargs={kwargs}")
     db = get_db()
-    allowed = {"name", "is_active", "daily_limit"}
+    allowed = {"name", "is_active", "daily_limit", "balance_usd"}
     updates = {k: v for k, v in kwargs.items() if k in allowed}
+    logger.info(f"[BALANCE] updates after filtering: {updates}")
     if not updates:
+        logger.warning(f"[BALANCE] No allowed fields to update for key_id={key_id}")
         return False
     if updates.get("is_active") == 1:
         updates["fail_count"] = 0
+    # Reset daily usage when balance is manually updated
+    if "balance_usd" in updates:
+        updates["today_used"] = 0
     updates["updated_at"] = datetime.now().isoformat()
     set_clause = ", ".join(f"{k} = ?" for k in updates)
     vals = list(updates.values()) + [key_id]
+    logger.info(f"[BALANCE] SQL: UPDATE api_keys SET {set_clause} WHERE id = ?")
+    logger.info(f"[BALANCE] Values: {vals}")
     cur = db.execute(f"UPDATE api_keys SET {set_clause} WHERE id = ?", vals)
     db.commit()
+    logger.info(f"[BALANCE] Updated {cur.rowcount} rows")
     return cur.rowcount > 0
 
 
@@ -405,14 +432,19 @@ def add_history(
     charge_points: int = 0,
     description_snapshot: str = "",
     preview_images_json: str = "",
+    titles_json: str = "[]",
+    tags_json: str = "[]",
+    target_audience: str = "",
+    all_images_json: str = "[]",
 ):
     db = get_db()
     db.execute(
         """INSERT INTO generation_history
            (task_id, api_key_id, user_id, product_type, country, model, prompt_size, prompt_resolution,
             total_images, success_count, status, elapsed_seconds, error_msg,
-            llm_request, llm_response, tasks_detail, charge_points, description_snapshot, preview_images_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            llm_request, llm_response, tasks_detail, charge_points, description_snapshot, preview_images_json,
+            titles_json, tags_json, target_audience, all_images_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(task_id) DO UPDATE SET
              api_key_id = excluded.api_key_id,
              user_id = excluded.user_id,
@@ -431,12 +463,17 @@ def add_history(
              tasks_detail = excluded.tasks_detail,
              charge_points = excluded.charge_points,
              description_snapshot = excluded.description_snapshot,
-             preview_images_json = excluded.preview_images_json""",
+             preview_images_json = excluded.preview_images_json,
+             titles_json = excluded.titles_json,
+             tags_json = excluded.tags_json,
+             target_audience = excluded.target_audience,
+             all_images_json = excluded.all_images_json""",
         (task_id, api_key_id, user_id, product_type, country, model,
          prompt_size, prompt_resolution, total_images, success_count,
          status, elapsed_seconds, error_msg,
          llm_request, llm_response, tasks_detail, charge_points,
-         description_snapshot, preview_images_json),
+         description_snapshot, preview_images_json,
+         titles_json, tags_json, target_audience, all_images_json),
     )
     db.commit()
 
@@ -639,6 +676,99 @@ def get_customer_login_lock(username: str) -> Optional[str]:
     if user_row and user_row["locked_until"]:
         times.append(user_row["locked_until"])
     return max(times) if times else None
+
+
+# ========== 管理员-用户管理 ==========
+
+def list_all_users() -> list[dict]:
+    """获取所有用户（不含 password_hash），关联 wallet 余额"""
+    db = get_db()
+    rows = db.execute("""
+        SELECT u.id, u.username, u.phone, u.email, u.status, u.is_unlimited,
+               u.last_login, u.created_at, u.note,
+               COALESCE(w.balance, 0) AS balance,
+               COALESCE(w.total_recharged, 0) AS total_recharged,
+               COALESCE(w.total_spent, 0) AS total_spent
+        FROM users u
+        LEFT JOIN user_wallets w ON u.id = w.user_id
+        ORDER BY u.id ASC
+    """).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["is_unlimited"] = bool(d.get("is_unlimited"))
+        result.append(d)
+    return result
+
+
+def admin_create_user(username: str, password_hash: str, phone: str = "", email: str = "", note: str = "") -> int:
+    """管理员创建用户 + 自动创建 wallet"""
+    db = get_db()
+    try:
+        cur = db.execute(
+            """INSERT INTO users (username, password_hash, phone, email, note, updated_at)
+               VALUES (?, ?, ?, ?, ?, datetime('now'))""",
+            (username.strip(), password_hash, phone.strip(), email.strip(), note.strip()),
+        )
+        user_id = int(cur.lastrowid)
+        db.execute("INSERT INTO user_wallets (user_id) VALUES (?)", (user_id,))
+        db.commit()
+        return user_id
+    except sqlite3.IntegrityError as exc:
+        db.rollback()
+        raise ValueError("username_exists") from exc
+
+
+def update_user_status(user_id: int, status: str) -> bool:
+    """更新用户 status（'active'/'frozen'）"""
+    db = get_db()
+    cur = db.execute(
+        "UPDATE users SET status = ?, updated_at = datetime('now') WHERE id = ?",
+        (status, user_id),
+    )
+    db.commit()
+    return cur.rowcount > 0
+
+
+def update_user_note(user_id: int, note: str) -> bool:
+    """更新用户备注"""
+    db = get_db()
+    cur = db.execute(
+        "UPDATE users SET note = ?, updated_at = datetime('now') WHERE id = ?",
+        (note.strip(), user_id),
+    )
+    db.commit()
+    return cur.rowcount > 0
+
+
+def delete_user(user_id: int) -> bool:
+    """删除用户 + 关联数据（按外键依赖顺序删除）"""
+    db = get_db()
+    user = db.execute("SELECT username FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not user:
+        return False
+    username = user["username"]
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        # 先收集该用户的 order_id，以便删除关联的 payment_transactions
+        order_ids = [r["id"] for r in db.execute("SELECT id FROM orders WHERE user_id = ?", (user_id,)).fetchall()]
+        # 按外键依赖顺序删除
+        if order_ids:
+            placeholders = ",".join("?" * len(order_ids))
+            db.execute(f"DELETE FROM payment_transactions WHERE order_id IN ({placeholders})", order_ids)
+        db.execute("DELETE FROM user_ledger WHERE user_id = ?", (user_id,))
+        db.execute("DELETE FROM generation_history WHERE user_id = ?", (user_id,))
+        db.execute("DELETE FROM orders WHERE user_id = ?", (user_id,))
+        db.execute("DELETE FROM user_wallets WHERE user_id = ?", (user_id,))
+        db.execute("DELETE FROM customer_login_attempts WHERE username = ?", (username,))
+        db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        # 清理过期的已撤销 token，保持 revoked_tokens 表整洁
+        db.execute("DELETE FROM revoked_tokens WHERE expires_at < datetime('now')")
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
 
 
 # ========== 系统配置 CRUD ==========
@@ -966,6 +1096,24 @@ def list_user_history(user_id: int, limit: int = 30) -> list[dict]:
             item["preview_images"] = []
         items.append(item)
     return items
+
+
+def get_user_history_detail(user_id: int, history_id: int) -> Optional[dict]:
+    """获取单条历史记录详情（含 titles/tags/target_audience/all_images）"""
+    db = get_db()
+    row = db.execute(
+        "SELECT * FROM generation_history WHERE id = ? AND user_id = ?",
+        (history_id, user_id),
+    ).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    for field in ("titles_json", "tags_json", "all_images_json", "preview_images_json"):
+        try:
+            item[field] = json.loads(item.get(field) or "[]")
+        except (json.JSONDecodeError, TypeError):
+            item[field] = []
+    return item
 
 
 def list_user_ledger(user_id: int, limit: int = 50) -> list[dict]:

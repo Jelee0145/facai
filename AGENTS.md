@@ -24,6 +24,20 @@
 - **Rate Limiting**: slowapi 实现后端 API 速率限制
 - **LLM Provider**: 可切换的 LLM 提供商接入层
 
+## 必读文档
+
+> 在修改代码前，请先阅读 `docs/` 下的相关文档。
+
+| 文档 | 内容 | 何时阅读 |
+|------|------|---------|
+| [docs/01-系统架构.md](docs/01-系统架构.md) | 双服务架构、请求流转、模块依赖、关键设计决策 | 理解系统全貌、架构变更 |
+| [docs/02-数据库设计.md](docs/02-数据库设计.md) | 14 张表 Schema、ER 关系、索引、数据生命周期 | 修改数据库、新增表/字段 |
+| [docs/03-后端开发指南.md](docs/03-后端开发指南.md) | 后端模块职责、环境变量、新增端点流程 | 后端开发、新增 API |
+| [docs/04-API参考手册.md](docs/04-API参考手册.md) | 全部接口的请求/响应/错误码/SSE 协议 | 修改或新增接口、前端对接 |
+| [docs/05-前端开发指南.md](docs/05-前端开发指南.md) | App Router 结构、API 代理、SSE Hook、UI 规范 | 前端开发、组件修改 |
+| [docs/06-部署运维.md](docs/06-部署运维.md) | Docker Compose、环境变量、健康检查、备份 | 部署配置、运维操作 |
+| [docs/07-安全机制.md](docs/07-安全机制.md) | 双 JWT 流程、CSRF、限流、防暴力破解 | 认证/授权相关改动 |
+
 ## 关键命令
 
 ```bash
@@ -139,9 +153,16 @@ cd backend && python test_prompts.py
 ├── Dockerfile.frontend     # 前端 Dockerfile
 ├── .dockerignore           # Docker 构建忽略规则
 ├── docs/                   # 项目文档
+│   ├── 01-系统架构.md      # 系统架构全景 (必读)
+│   ├── 02-数据库设计.md    # 数据库 Schema 与 ER 关系 (必读)
+│   ├── 03-后端开发指南.md  # 后端开发入门 (必读)
+│   ├── 04-API参考手册.md   # 全量 API 接口文档 (必读)
+│   ├── 05-前端开发指南.md  # 前端开发入门 (必读)
+│   ├── 06-部署运维.md      # Docker 部署与运维 (必读)
+│   ├── 07-安全机制.md      # 认证/CSRF/限流设计 (必读)
 │   ├── REQUIREMENTS_v2.md  # v2 需求文档
 │   ├── TASKS_v2.md         # v2 任务拆分
-│   ├── SECURITY_UPGRADE.md # 安全升级指南
+│   ├── SECURITY_UPGRADE.md # 安全升级变更日志
 │   └── DEPLOYMENT_CHECKLIST.md # 部署检查清单
 └── .env                    # APIMART_API_KEY (勿提交到公开仓库)
 ```

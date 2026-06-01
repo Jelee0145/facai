@@ -13,7 +13,7 @@ class KeyManager:
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._current_index = 0
+        self._current_index = -1
 
     def get_active_key(self) -> Optional[dict]:
         """获取下一个可用 Key（轮询）"""
@@ -56,6 +56,8 @@ class KeyManager:
                     "daily_limit": k["daily_limit"],
                     "fail_count": k["fail_count"],
                     "usage_pct": round(k["today_used"] / k["daily_limit"] * 100, 1) if k["daily_limit"] else 0,
+                    "balance_usd": k.get("balance_usd", 0) or 0,
+                    "remaining_quota": int((k.get("balance_usd", 0) or 0) / 0.006),
                 }
                 for k in keys
             ],

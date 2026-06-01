@@ -44,6 +44,20 @@ interface UserHistoryItem {
   status: string;
 }
 
+interface HistoryDetailItem {
+  id: number;
+  created_at: string;
+  product_type: string;
+  description_snapshot: string;
+  preview_images: string[];
+  all_images_json: string[];
+  titles_json: string[];
+  tags_json: string[];
+  target_audience: string;
+  status: string;
+  charge_points: number;
+}
+
 interface LedgerItem {
   id: number;
   type: string;
@@ -116,6 +130,9 @@ const COUNTRIES = [
   { code: "usa", name: "美国", flag: "🇺🇸", currency: "USD", shopUrl: "https://seller.tiktok.com/", platform: "TikTok Shop USA" },
 ];
 
+const MAIN_IMAGE_COUNT = 9;
+const TOTAL_GENERATION_IMAGES = 11;
+
 // 预定义商品类型 - 全品类
 const PRODUCT_TYPES = [
   // 服装类
@@ -170,6 +187,7 @@ export default function HomePage() {
   const [selectedModel, setSelectedModel] = useState<string>("general");
   const [selectedProduct, setSelectedProduct] = useState<string>("top");
   const [description, setDescription] = useState<string>("");
+  const [modelImageCount, setModelImageCount] = useState<number>(4);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [selectedCategory, setSelectedCategory] = useState<string>("服装");
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
@@ -205,6 +223,8 @@ export default function HomePage() {
 
   // 生成结果
   const [generatedImages, setGeneratedImages] = useState<string[]>([]);
+  const [generatedProductImages, setGeneratedProductImages] = useState<string[]>([]);
+  const [generatedModelImageCount, setGeneratedModelImageCount] = useState<number>(4);
 
   // 对比图和细节图
   const [comparisonImage, setComparisonImage] = useState<string | null>(null);
@@ -223,11 +243,11 @@ export default function HomePage() {
   // 进度追踪
   const [progressPercent, setProgressPercent] = useState(0);
   const [completedCount, setCompletedCount] = useState(0);
-  const [totalCount, setTotalCount] = useState(14);
+  const [totalCount, setTotalCount] = useState(TOTAL_GENERATION_IMAGES);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [generationStatus, setGenerationStatus] = useState<string>("idle");
-  const [latestImage, setLatestImage] = useState<string | null>(null);
   const [currentTaskId, setCurrentTaskId] = useState<string | null>(null);
+  const [simulatedProgressActive, setSimulatedProgressActive] = useState<boolean>(false);
   const [user, setUser] = useState<UserProfile | null>(null);
   const [wallet, setWallet] = useState<Wallet | null>(null);
   const [csrfToken, setCsrfToken] = useState("");
@@ -238,6 +258,9 @@ export default function HomePage() {
   const [authLoading, setAuthLoading] = useState(false);
   const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [historyItems, setHistoryItems] = useState<UserHistoryItem[]>([]);
+  const [showDetailModal, setShowDetailModal] = useState(false);
+  const [detailItem, setDetailItem] = useState<HistoryDetailItem | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [showBillingModal, setShowBillingModal] = useState(false);
   const [packages, setPackages] = useState<CreditPackage[]>([]);
   const [ledgerItems, setLedgerItems] = useState<LedgerItem[]>([]);
@@ -280,29 +303,50 @@ export default function HomePage() {
       .catch((e) => logger.error("Failed to load credit packages:", e));
   }, []);
 
+  // 计时器 - 生成期间每秒递增
+  useEffect(() => {
+    if (generationStatus !== "generating" && generationStatus !== "submitting") return;
+    const interval = setInterval(() => setElapsedSeconds((p) => p + 1), 1000);
+    return () => clearInterval(interval);
+  }, [generationStatus]);
+
+  // 模拟进度 - 每3-5秒递增1-5%，上限90%
+  useEffect(() => {
+    if (!simulatedProgressActive || generationStatus !== "generating") return;
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      setProgressPercent((prev) => {
+        if (prev >= 90) return prev;
+        return Math.min(prev + Math.floor(Math.random() * 5) + 1, 90);
+      });
+      timeoutId = setTimeout(tick, Math.floor(Math.random() * 2000) + 3000);
+    };
+    timeoutId = setTimeout(tick, 2000);
+    return () => clearTimeout(timeoutId);
+  }, [simulatedProgressActive, generationStatus]);
+
   useSSE(currentTaskId, {
     onProgress: (data: unknown) => {
       const d = data as Record<string, unknown>;
       const completed = typeof d.completed === "number" ? d.completed : 0;
-      const total = typeof d.total === "number" ? d.total : 14;
+      const total = typeof d.total === "number" ? d.total : TOTAL_GENERATION_IMAGES;
       setCompletedCount(completed);
-      setProgressPercent(Math.round((completed / total) * 100));
-      const images = Array.isArray(d.images) ? d.images as Array<Record<string, unknown>> : null;
-      if (images) {
-        const lastCompleted = images.findLast(
-          (img) => img.status === "completed" && img.url
-        );
-        if (lastCompleted) {
-          setLatestImage(String(lastCompleted.url));
-        }
-      }
+      const realPercent = Math.round((completed / total) * 100);
+      setProgressPercent((prev) => Math.max(prev, realPercent));
     },
     onComplete: (data: unknown) => {
       const d = data as Record<string, unknown>;
       const result = d.result as Record<string, unknown> | undefined;
       const r = result?.data as Record<string, unknown> | undefined;
       if (r) {
-        if (Array.isArray(r.modelImages)) setGeneratedImages(r.modelImages as string[]);
+        if (Array.isArray(r.mainImages)) {
+          setGeneratedImages(r.mainImages as string[]);
+        } else if (Array.isArray(r.modelImages)) {
+          setGeneratedImages(r.modelImages as string[]);
+        }
+        if (Array.isArray(r.productImages)) setGeneratedProductImages(r.productImages as string[]);
+        if (typeof r.modelImageCount === "number") setGeneratedModelImageCount(r.modelImageCount);
+        else if (Array.isArray(r.modelImages)) setGeneratedModelImageCount(r.modelImages.length);
         if (Array.isArray(r.titles)) setGeneratedTitles(r.titles as string[]);
         if (Array.isArray(r.tags)) setGeneratedTags(r.tags as string[]);
         if (typeof r.targetAudience === "string") setApplicableCrowd(r.targetAudience);
@@ -311,6 +355,7 @@ export default function HomePage() {
         if (typeof r.detailImage === "string") setDetailImage(r.detailImage);
       }
       setGenerationStatus("completed");
+      setSimulatedProgressActive(false);
       setProgressPercent(100);
       setIsLoading(false);
       setCurrentTaskId(null);
@@ -318,6 +363,7 @@ export default function HomePage() {
     },
     onError: (error: string) => {
       setGenerationStatus("error");
+      setSimulatedProgressActive(false);
       setIsLoading(false);
       setCurrentTaskId(null);
       toast.error("生成失败: " + error);
@@ -329,6 +375,8 @@ export default function HomePage() {
   );
 
   const currentCountry = COUNTRIES.find((c) => c.code === selectedCountry);
+  const productImageCount = MAIN_IMAGE_COUNT - modelImageCount;
+  const sliderProgress = (modelImageCount / MAIN_IMAGE_COUNT) * 100;
 
   const refreshWallet = async () => {
     const res = await fetch("/api/user/wallet");
@@ -355,7 +403,14 @@ export default function HomePage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(String(data.detail || "登录失败"));
+        const detail = data.detail;
+        let msg = "登录失败";
+        if (Array.isArray(detail)) {
+          msg = detail.map((e: Record<string, unknown>) => e.msg || JSON.stringify(e)).join("; ");
+        } else if (typeof detail === "string") {
+          msg = detail;
+        }
+        toast.error(msg);
         return;
       }
       setUser(data.user);
@@ -388,6 +443,22 @@ export default function HomePage() {
     const data = await res.json();
     setHistoryItems(data.items || []);
     setShowHistoryModal(true);
+  };
+
+  const loadHistoryDetail = async (historyId: number) => {
+    setDetailLoading(true);
+    try {
+      const res = await fetch(`/api/user/history/${historyId}`);
+      if (!res.ok) {
+        toast.error("加载详情失败");
+        return;
+      }
+      const data = await res.json();
+      setDetailItem(data.item);
+      setShowDetailModal(true);
+    } finally {
+      setDetailLoading(false);
+    }
   };
 
   const loadBilling = async () => {
@@ -489,6 +560,8 @@ export default function HomePage() {
 
     // 清空旧结果并初始化进度
     setGeneratedImages([]);
+    setGeneratedProductImages([]);
+    setGeneratedModelImageCount(modelImageCount);
     setGeneratedTitles([]);
     setGeneratedTags([]);
     setComparisonImage(null);
@@ -499,9 +572,8 @@ export default function HomePage() {
     setTestTags([]);
     setProgressPercent(0);
     setCompletedCount(0);
-    setTotalCount(14);
+    setTotalCount(TOTAL_GENERATION_IMAGES);
     setElapsedSeconds(0);
-    setLatestImage(null);
     setGenerationStatus("submitting");
     setIsLoading(true);
 
@@ -515,6 +587,7 @@ export default function HomePage() {
           product_type: getEffectiveProductType(),
           country: selectedCountry,
           model: selectedModel,
+          model_image_count: modelImageCount,
         }),
       });
 
@@ -525,6 +598,7 @@ export default function HomePage() {
 
       const { task_id } = await startRes.json();
       setGenerationStatus("generating");
+      setSimulatedProgressActive(true);
       setCurrentTaskId(task_id);
     } catch (error) {
       logger.error("生成失败:", error);
@@ -566,6 +640,7 @@ export default function HomePage() {
           product_type: getEffectiveProductType(),
           country: selectedCountry,
           model: selectedModel,
+          model_image_count: modelImageCount,
           generate_type: "test",
         }),
       });
@@ -598,7 +673,7 @@ export default function HomePage() {
     }
     if (!uploadedImage) return;
 
-    if ((wallet?.balance || 0) < generationCostPoints) {
+    if ((wallet?.balance || 0) < 2) {
       loadBilling().catch((e) => logger.error("Failed to load billing:", e));
       toast.warning("积分不足，请先充值");
       return;
@@ -620,8 +695,10 @@ export default function HomePage() {
           product_type: getEffectiveProductType(),
           country: selectedCountry,
           model: selectedModel,
+          model_image_count: generatedModelImageCount,
           generate_type: "test",
           style_index: styleIndex,
+          charge_points: 2,
         }),
       });
 
@@ -634,12 +711,13 @@ export default function HomePage() {
         });
         refreshWallet().catch((e) => logger.error("Failed to refresh wallet:", e));
       } else {
-        toast.error(`单图生成失败: ${data.detail || data.error || "未知错误"}`);
+        toast.error(`单图重试失败: ${data.detail || data.error || "未知错误"}`);
         refreshWallet().catch((e) => logger.error("Failed to refresh wallet:", e));
       }
     } catch (error) {
-      logger.error("单图生成失败:", error);
-      toast.error("单图生成失败，请重试");
+      logger.error("单图重试失败:", error);
+      toast.error("单图重试失败，请重试");
+      refreshWallet().catch((e) => logger.error("Failed to refresh wallet:", e));
     } finally {
       setIsLoading(false);
     }
@@ -647,7 +725,7 @@ export default function HomePage() {
 
   const handleAddCustomType = async () => {
     if (!newCustomTypeName.trim()) {
-      alert("请输入自定义类型名称");
+      toast.warning("请输入自定义类型名称");
       return;
     }
 
@@ -677,7 +755,7 @@ export default function HomePage() {
       setSelectedProduct(newType.code);
     } catch (e) {
       logger.error("添加自定义类型失败:", e);
-      alert("添加失败，请检查后端服务是否运行");
+      toast.error("添加失败，请检查后端服务是否运行");
       return;
     }
 
@@ -689,6 +767,7 @@ export default function HomePage() {
   const handleDeleteCustomType = async (code: string) => {
     const idMatch = code.match(/^db_(\d+)$/);
     if (!idMatch) return;
+    if (!confirm("确定删除此自定义类型？")) return;
 
     try {
       const res = await fetchWithRetry(`/api/custom-types?id=${idMatch[1]}`, { method: "DELETE" });
@@ -819,12 +898,7 @@ export default function HomePage() {
                 </button>
               )}
               <span className="text-sm text-purple-300">九国市场</span>
-              <a
-                href={currentCountry?.shopUrl || "https://seller.tiktok.com/"}
-                className="px-4 py-2 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-lg font-medium hover:opacity-90 transition-opacity"
-              >
-                前往卖家后台
-              </a>
+
             </div>
           </div>
         </div>
@@ -1061,11 +1135,43 @@ export default function HomePage() {
               </div>
               <div className="flex flex-wrap gap-1.5">
                 {testTags.map((t, i) => (
-                  <span key={i} className="px-2.5 py-1 bg-pink-600/40 text-white/90 text-xs rounded-full">#{t}</span>
+                  <span key={i} className="px-2.5 py-1 bg-pink-600/40 text-white/90 text-xs rounded-full">{t}</span>
                 ))}
               </div>
             </div>
           )}
+        </section>
+
+        {/* 模特图数量 */}
+        <section className="mb-6">
+          <div className="flex flex-col gap-3 rounded-xl border border-white/10 bg-white/5 p-4 sm:flex-row sm:items-center">
+            <div className="min-w-32">
+              <div className="text-sm font-medium text-white">模特图数量</div>
+              <div className="text-xs text-white/55">9张主图内分配</div>
+            </div>
+            <div className="flex flex-1 items-center gap-4">
+              <input
+                type="range"
+                min={0}
+                max={MAIN_IMAGE_COUNT}
+                step={1}
+                value={modelImageCount}
+                disabled={isLoading}
+                onChange={(e) => setModelImageCount(Number(e.target.value))}
+                aria-label="选择模特图数量"
+                className="h-4 min-w-0 flex-1 cursor-pointer appearance-none rounded-full border border-white/35 outline-none transition disabled:cursor-not-allowed disabled:opacity-60 [&::-moz-range-thumb]:h-6 [&::-moz-range-thumb]:w-6 [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-2 [&::-moz-range-thumb]:border-white [&::-moz-range-thumb]:bg-blue-500 [&::-webkit-slider-thumb]:h-6 [&::-webkit-slider-thumb]:w-6 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-white [&::-webkit-slider-thumb]:bg-blue-500"
+                style={{
+                  background: `linear-gradient(to right, #2563eb 0%, #2563eb ${sliderProgress}%, #050505 ${sliderProgress}%, #050505 100%)`,
+                }}
+              />
+              <div className="w-32 shrink-0 rounded-lg bg-blue-500 px-3 py-2 text-center text-sm font-semibold text-white">
+                已选 {modelImageCount} 张
+              </div>
+            </div>
+            <div className="text-xs text-white/55 sm:w-28 sm:text-right">
+              商品图 {productImageCount} 张
+            </div>
+          </div>
         </section>
 
         {/* 一键生成按钮 */}
@@ -1080,16 +1186,37 @@ export default function HomePage() {
             } text-white`}
           >
             {isLoading ? (
-              <div className="w-full space-y-4">
+              <div className="w-full px-6 space-y-4">
                 {/* 进度条 */}
                 <div className="space-y-2">
-                  <div className="flex justify-between text-sm text-white/80">
+                  <div className="text-center text-sm text-white/80">
                     <span>
-                      {generationStatus === "submitting" ? "正在提交任务..." : "AI 正在生成图片..."}
+                      {generationStatus === "submitting"
+                        ? "正在提交任务..."
+                        : "AI 正在生成图片，请耐心等待..."}
                     </span>
+                  </div>
+                  <div className="text-right text-sm text-white/80">
                     <span>{completedCount}/{totalCount} 张</span>
                   </div>
-                  <Progress value={progressPercent} className="h-3 bg-white/20 [&>div]:bg-gradient-to-r [&>div]:from-purple-400 [&>div]:via-pink-400 [&>div]:to-red-400" />
+                  <div className="relative h-3 bg-white/20 rounded-full overflow-hidden">
+                    {/* Shimmer 动画叠加层 */}
+                    <div
+                      className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent"
+                      style={{
+                        backgroundSize: "200% 100%",
+                        animation: "shimmer 2s infinite linear",
+                      }}
+                    />
+                    {/* 实际进度填充 */}
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-purple-400 via-pink-400 to-red-400"
+                      style={{
+                        width: `${progressPercent}%`,
+                        transition: "width 0.5s ease-out",
+                      }}
+                    />
+                  </div>
                 </div>
                 {/* 计时器 */}
                 <div className="flex items-center justify-center gap-6 text-sm text-white/70">
@@ -1099,30 +1226,13 @@ export default function HomePage() {
                   </span>
                   <span>{progressPercent}%</span>
                 </div>
-                {/* 最新完成的图片缩略图 */}
-                {latestImage && (
-                  <div className="flex justify-center">
-                    <div className="relative w-16 h-16 rounded-lg overflow-hidden border-2 border-purple-400/50 animate-in fade-in zoom-in">
-                      <img
-                        src={proxyImg(latestImage)}
-                        alt="最新生成"
-                        className="w-full h-full object-cover"
-                        loading="lazy"
-                        decoding="async"
-                      />
-                      <div className="absolute inset-0 bg-gradient-to-t from-black/40 to-transparent flex items-end justify-center">
-                        <span className="text-[8px] text-white pb-0.5">完成!</span>
-                      </div>
-                    </div>
-                  </div>
-                )}
               </div>
             ) : (
-              "🚀 一键生成：11张图 + 爆款标题 + 热门标签"
+              `🚀 一键生成：9张主图 + 2张辅助图`
             )}
           </button>
           <p className="text-center text-white/60 text-sm mt-3">
-            系统将根据商品类型自动匹配风格和拍摄角度，生成多样化电商主图
+            当前将生成 {modelImageCount} 张模特图、{productImageCount} 张商品图，并附带局部放大图和白底对比图
           </p>
         </section>
 
@@ -1131,9 +1241,11 @@ export default function HomePage() {
           <section className="mb-8">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-xl font-bold text-white flex items-center gap-2">
-                <span>✨</span> 生成的图片（含模特展示）
+                <span>✨</span> 生成的主图
               </h2>
-              <span className="text-white/50 text-sm">{generatedImages.length} 张</span>
+              <span className="text-white/50 text-sm">
+                模特图 {generatedModelImageCount} 张 / 商品图 {generatedProductImages.length} 张
+              </span>
             </div>
             <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-3">
               {generatedImages.map((imgUrl, index) => (
@@ -1151,7 +1263,9 @@ export default function HomePage() {
                   />
                   {/* 风格编号 */}
                   <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-1.5">
-                    <span className="text-white text-[10px] leading-none">风格 {index + 1}</span>
+                    <span className="text-white text-[10px] leading-none">
+                      {index < generatedModelImageCount ? `模特图 ${index + 1}` : `商品图 ${index - generatedModelImageCount + 1}`}
+                    </span>
                   </div>
                   {/* 复制按钮 */}
                   <div className="absolute top-1 right-1 z-10 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -1163,15 +1277,15 @@ export default function HomePage() {
                       {copiedIndex === index ? "✓" : "📷"}
                     </button>
                   </div>
-                  {/* 单图测试按钮 */}
+                  {/* 单图重试按钮 */}
                   <div className="absolute top-1 left-1 z-10 opacity-0 group-hover:opacity-100 transition-opacity">
                     <button
                       onClick={(e) => { e.stopPropagation(); handleSingleImageTest(index); }}
                       disabled={isLoading || !imgUrl}
                       className="p-1.5 bg-orange-500/70 hover:bg-orange-500 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-md text-white text-xs transition-all"
-                      title="单图测试"
+                      title="单图重试"
                     >
-                      🔬
+                      🔄
                     </button>
                   </div>
                 </div>
@@ -1228,14 +1342,13 @@ export default function HomePage() {
                     {generatedTags.map((tag, index) => (
                       <button
                         key={index}
-                        onClick={() => copyToClipboard(`#${tag}`, index + 10)}
+                        onClick={() => copyToClipboard(`${tag}`, index + 10)}
                         className={`group relative px-4 py-2 rounded-full text-sm font-medium transition-all ${
                           copiedTitleIndex === index + 10
                             ? "bg-green-500/80 text-white"
                             : "bg-gradient-to-r from-pink-600/60 to-purple-600/60 hover:from-pink-500 hover:to-purple-500 text-white shadow-lg shadow-pink-500/20"
                         }`}
                       >
-                        <span className="font-bold text-amber-300">#</span>
                         <span>{tag}</span>
                         <span className={`ml-2 text-xs ${copiedTitleIndex === index + 10 ? "text-green-200" : "text-white/40 group-hover:text-white/70"}`}>
                           {copiedTitleIndex === index + 10 ? "✓" : "📋"}
@@ -1400,14 +1513,13 @@ export default function HomePage() {
             {generatedTags.map((tag, index) => (
               <button
                 key={index}
-                onClick={() => copyToClipboard(`#${tag}`, index + 10)}
+                onClick={() => copyToClipboard(`${tag}`, index + 10)}
                 className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
                   copiedTitleIndex === index + 10
                     ? "bg-green-500 text-white"
                     : "bg-gradient-to-r from-pink-600/60 to-purple-600/60 hover:from-pink-500 hover:to-purple-500 text-white shadow-lg shadow-pink-500/20"
                 }`}
               >
-                <span className="font-bold text-amber-300">#</span>
                 {tag}
               </button>
             ))}
@@ -1445,11 +1557,40 @@ export default function HomePage() {
             placeholder="密码"
             value={authForm.password}
             onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })}
-            className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-white/50 focus:outline-none focus:border-purple-500"
+            className={`w-full px-4 py-3 bg-white/10 border rounded-lg text-white placeholder-white/50 focus:outline-none focus:border-purple-500 ${
+              authMode === "register" && authForm.password.length > 0 && !(
+                authForm.password.length >= 12 &&
+                /[a-z]/.test(authForm.password) &&
+                /[A-Z]/.test(authForm.password) &&
+                /[0-9]/.test(authForm.password) &&
+                /[^a-zA-Z0-9]/.test(authForm.password)
+              )
+                ? "border-red-500"
+                : "border-white/20"
+            }`}
             required
-            minLength={6}
-            maxLength={100}
+            minLength={authMode === "register" ? 12 : 6}
+            maxLength={128}
           />
+          {authMode === "register" && authForm.password.length > 0 && (() => {
+            const pw = authForm.password;
+            const rules = [
+              { ok: pw.length >= 12, text: "至少12位" },
+              { ok: /[a-z]/.test(pw), text: "包含小写字母" },
+              { ok: /[A-Z]/.test(pw), text: "包含大写字母" },
+              { ok: /[0-9]/.test(pw), text: "包含数字" },
+              { ok: /[^a-zA-Z0-9]/.test(pw), text: "包含特殊字符" },
+            ];
+            return (
+              <ul className="space-y-0.5">
+                {rules.map((r) => (
+                  <li key={r.text} className={`text-xs ${r.ok ? "text-green-400" : "text-red-400"}`}>
+                    {r.ok ? "✓" : "✗"} {r.text}
+                  </li>
+                ))}
+              </ul>
+            );
+          })()}
           {authMode === "register" && (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <input
@@ -1495,7 +1636,7 @@ export default function HomePage() {
       >
         <div className="space-y-3">
           {historyItems.map((item) => (
-            <div key={item.id} className="grid grid-cols-1 md:grid-cols-[1.1fr_1fr_1.6fr_1.4fr] gap-4 items-center bg-white/5 border border-white/10 rounded-lg p-4">
+            <div key={item.id} className="grid grid-cols-1 md:grid-cols-[1.1fr_1fr_1.6fr_1.4fr_auto] gap-4 items-center bg-white/5 border border-white/10 rounded-lg p-4">
               <div className="text-white/80 text-sm">{item.created_at?.replace("T", " ").slice(0, 19)}</div>
               <div className="text-white font-medium">{item.product_type || "-"}</div>
               <div className="text-white/70 text-sm line-clamp-2">{item.description_snapshot || ""}</div>
@@ -1511,12 +1652,140 @@ export default function HomePage() {
                   />
                 ))}
               </div>
+              <button
+                onClick={() => loadHistoryDetail(item.id)}
+                disabled={detailLoading}
+                className="px-3 py-1.5 bg-purple-500/70 hover:bg-purple-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-white text-xs rounded-lg transition-all whitespace-nowrap"
+              >
+                详情
+              </button>
             </div>
           ))}
           {historyItems.length === 0 && (
             <div className="py-10 text-center text-white/50">暂无生成历史</div>
           )}
         </div>
+      </Modal>
+
+      {/* 历史记录详情弹窗 */}
+      <Modal
+        open={showDetailModal}
+        title="生成详情"
+        onClose={() => { setShowDetailModal(false); setDetailItem(null); }}
+        containerClassName="w-full max-w-3xl"
+      >
+        {detailLoading ? (
+          <div className="py-10 text-center text-white/50">加载中...</div>
+        ) : detailItem ? (
+          <div className="space-y-6">
+            {/* 元信息 */}
+            <div className="flex flex-wrap gap-4 text-sm text-white/60">
+              <span>{detailItem.created_at?.replace("T", " ").slice(0, 19)}</span>
+              <span>{detailItem.product_type || "-"}</span>
+              <span className={detailItem.status === "completed" ? "text-green-400" : "text-red-400"}>
+                {detailItem.status === "completed" ? "已完成" : "失败"}
+              </span>
+            </div>
+
+            {/* 描述 */}
+            {detailItem.description_snapshot && (
+              <div>
+                <h4 className="text-white font-medium mb-2 flex items-center gap-2">
+                  <span>📝</span> 描述
+                </h4>
+                <p className="text-white/70 text-sm bg-white/5 rounded-lg p-3">{detailItem.description_snapshot}</p>
+              </div>
+            )}
+
+            {/* 适用人群 */}
+            {detailItem.target_audience && (
+              <div className="p-4 bg-gradient-to-r from-green-500/20 to-blue-500/20 rounded-lg border border-green-500/30">
+                <h4 className="text-white font-medium mb-1 flex items-center gap-2">
+                  <span>👥</span> 适用人群
+                </h4>
+                <p className="text-green-300 font-medium">{detailItem.target_audience}</p>
+              </div>
+            )}
+
+            {/* 生成图片 */}
+            {(() => {
+              const detailImages = (detailItem.all_images_json || []).length > 0
+                ? detailItem.all_images_json
+                : (detailItem.preview_images || []);
+              return detailImages.length > 0 && (
+                <div>
+                  <h4 className="text-white font-medium mb-3 flex items-center gap-2">
+                    <span>🖼️</span> 生成图片
+                  </h4>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    {detailImages.map((url: string, i: number) => (
+                      <img
+                        key={i}
+                        src={proxyImg(url)}
+                        alt={`图片 ${i + 1}`}
+                        className="w-full h-40 object-cover rounded-lg border border-white/10 cursor-pointer hover:border-purple-500 transition-all"
+                        onClick={() => setLightboxUrl(url)}
+                        loading="lazy"
+                        decoding="async"
+                      />
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* 爆款标题 */}
+            {(detailItem.titles_json || []).length > 0 && (
+              <div>
+                <h4 className="text-white font-medium mb-3 flex items-center gap-2">
+                  <span>🔥</span> 爆款标题
+                </h4>
+                <div className="space-y-2">
+                  {detailItem.titles_json.map((title: string, index: number) => (
+                    <div key={index} className="flex items-center gap-2 p-3 bg-white/5 rounded-lg">
+                      <span className="text-white/60 text-sm">{index + 1}.</span>
+                      <span className="flex-1 text-white text-sm">{title}</span>
+                      <button
+                        onClick={() => copyToClipboard(title, index)}
+                        className="px-3 py-1 bg-purple-500/50 hover:bg-purple-500 text-white text-sm rounded transition-all"
+                      >
+                        复制
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* 标签 */}
+            {(detailItem.tags_json || []).length > 0 && (
+              <div>
+                <h4 className="text-white font-medium mb-3 flex items-center gap-2">
+                  <span>🏷️</span> 标签
+                </h4>
+                <div className="flex flex-wrap gap-2">
+                  {detailItem.tags_json.map((tag: string, index: number) => (
+                    <button
+                      key={index}
+                      onClick={() => copyToClipboard(tag, index + 50)}
+                      className="px-4 py-2 rounded-full text-sm font-medium bg-gradient-to-r from-pink-600/60 to-purple-600/60 hover:from-pink-500 hover:to-purple-500 text-white transition-all"
+                    >
+                      {tag}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* 关闭按钮 */}
+            <button
+              onClick={() => { setShowDetailModal(false); setDetailItem(null); }}
+              className="w-full py-3 bg-white/10 hover:bg-white/20 text-white rounded-lg font-medium transition-all"
+            >
+              关闭
+            </button>
+          </div>
+        ) : null}
       </Modal>
 
       <Modal
@@ -1612,6 +1881,7 @@ export default function HomePage() {
         <div className="max-w-7xl mx-auto px-4 text-center text-white/60">
           <p>发财计划 - 让跨境电商更简单</p>
           <p className="text-sm mt-2">支持泰国、越南、马来西亚、菲律宾、印尼、日本、韩国、美国、中国九大市场</p>
+          <p className="text-sm mt-2">联系管理员/问题反馈：邱忠祥 13543825114</p>
         </div>
       </footer>
     </div>

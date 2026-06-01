@@ -12,6 +12,7 @@ const menu = [
   { label: "计费管理", path: "/admin/billing" },
   { label: "LLM 设置", path: "/admin/llm" },
   { label: "历史记录", path: "/admin/history" },
+  { label: "账号管理", path: "/admin/users" },
 ];
 
 function AdminLayoutInner({ children }: { children: ReactNode }) {

@@ -1,390 +1,186 @@
-# projects
+# 发财计划 — AI 商品图生成平台
 
-这是一个基于 [Next.js 16](https://nextjs.org) + [shadcn/ui](https://ui.shadcn.com) 的全栈应用项目。
+面向 TikTok Shop / 抖音电商的一站式 AI 商品图生成 SaaS 平台。上传商品图，一键生成 9 张主图 + 2 张辅助图，附带爆款标题和热门标签，覆盖美国、英国及东南亚 9 国市场。
+
+## 功能亮点
+
+- **一键生成** — 上传商品图，自动匹配品类、选择 AI 风格，批量生成 11 张电商主图
+- **9 国市场** — 支持美国、英国、印尼、泰国、越南、菲律宾、马来西亚、新加坡、墨西哥
+- **6 种 AI 风格** — 通用、人像、时尚、产品、艺术、爆款，按品类智能匹配最佳风格
+- **LLM 智能分析** — 集成阿里云 DashScope（Qwen3-VL），智能配置提示词和场景，不可用时自动降级为模板
+- **积分计费系统** — 用户注册、积分充值、套餐管理、消费明细、失败自动退款
+- **管理后台** — 数据看板、API Key 池管理（自动故障转移）、用户管理、LLM 配置、扣费控制
+- **实时进度** — SSE 推送生成进度，支持异步生成和超时任务自动回收
+- **安全认证** — JWT + CSRF 双重防护、bcrypt 密码加密、登录锁定、Token 撤销
+
+## 技术栈
+
+| 层级 | 技术 |
+|------|------|
+| 前端 | Next.js 16 (App Router) + React 19 + TypeScript + Tailwind CSS v4 + shadcn/ui |
+| 后端 | Python FastAPI + Uvicorn + Pydantic v2 |
+| 数据库 | SQLite（14 张表，自动迁移） |
+| AI 服务 | apimart.ai（图片生成）+ 阿里云 DashScope / Qwen3-VL（提示词分析） |
+| 部署 | Docker Compose（前端 Node 22 + 后端 Python 3.11） |
+| 包管理 | pnpm 9+（前端）、pip（后端） |
+
+## 项目结构
+
+```
+├── src/app/                    # 前端页面
+│   ├── page.tsx                # 主工作台（图片生成）
+│   ├── admin/                  # 管理后台
+│   │   ├── login/page.tsx      #   登录
+│   │   ├── users/page.tsx      #   用户管理
+│   │   ├── billing/page.tsx    #   计费管理
+│   │   ├── keys/page.tsx       #   API Key 管理
+│   │   ├── llm/page.tsx        #   LLM 配置
+│   │   └── history/page.tsx    #   生成历史
+│   └── api/                    # Next.js API 代理层
+├── src/components/ui/          # shadcn/ui 组件
+├── src/lib/                    # 工具库（代理、SSE、fetch、日志等）
+├── backend/
+│   ├── main.py                 # FastAPI 主入口 + 全部路由
+│   ├── database.py             # SQLite 数据层（14 张表 + 自动迁移）
+│   ├── security.py             # JWT 认证、CSRF、密码加密、登录锁定
+│   ├── llm_provider.py         # DashScope LLM 集成
+│   ├── prompts_v2.py           # 品类匹配、风格选择、提示词构建
+│   ├── key_manager.py          # API Key 池管理与故障转移
+│   └── requirements.txt
+├── docker-compose.yml          # Docker 一键部署
+├── Dockerfile.backend
+├── Dockerfile.frontend
+└── scripts/                    # 启动脚本
+```
 
 ## 快速开始
 
-### 启动开发服务器
+### 环境要求
+
+- Node.js 22+
+- Python 3.11+
+- pnpm 9+
+
+### 本地开发
+
+**1. 克隆项目**
+
+```bash
+git clone <repo-url> && cd projects
+```
+
+**2. 后端**
+
+```bash
+cd backend
+cp .env.example .env          # 编辑 .env，填入 APIMART_API_KEY 等
+pip install -r requirements.txt
+python main.py                 # 启动在 http://localhost:8001
+```
+
+**3. 前端**
+
+```bash
+cd ..                          # 回到项目根目录
+pnpm install
+pnpm dev                       # 启动在 http://localhost:4524
+```
+
+或使用启动脚本：
 
 ```bash
 bash scripts/dev.sh
 ```
 
-启动后，在浏览器中打开 [http://localhost:5000](http://localhost:5000) 查看应用。
-
-开发服务器支持热更新，修改代码后页面会自动刷新。
-
-### 构建生产版本
+### Docker Compose 部署
 
 ```bash
-bash scripts/build.sh
+cp backend/.env.example backend/.env   # 编辑配置
+docker compose up -d --build
 ```
 
-### 启动生产服务器
-
-```bash
-bash scripts/start.sh
-```
-
-## 项目结构
-
-```
-src/
-├── app/                      # Next.js App Router 目录
-│   ├── layout.tsx           # 根布局组件
-│   ├── page.tsx             # 首页
-│   ├── globals.css          # 全局样式（包含 shadcn 主题变量）
-│   └── [route]/             # 其他路由页面
-├── components/              # React 组件目录
-│   └── ui/                  # shadcn/ui 基础组件（优先使用）
-│       ├── button.tsx
-│       ├── card.tsx
-│       └── ...
-├── lib/                     # 工具函数库
-│   └── utils.ts            # cn() 等工具函数
-└── hooks/                   # 自定义 React Hooks（可选）
-
-server/
-├── index.ts                 # 自定义服务器入口
-├── tsconfig.json           # Server TypeScript 配置
-└── dist/                    # 编译输出目录（自动生成）
-```
-
-## 核心开发规范
-
-### 1. 组件开发
-
-**优先使用 shadcn/ui 基础组件**
-
-本项目已预装完整的 shadcn/ui 组件库，位于 `src/components/ui/` 目录。开发时应优先使用这些组件作为基础：
-
-```tsx
-// ✅ 推荐：使用 shadcn 基础组件
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
-
-export default function MyComponent() {
-  return (
-    <Card>
-      <CardHeader>标题</CardHeader>
-      <CardContent>
-        <Input placeholder="输入内容" />
-        <Button>提交</Button>
-      </CardContent>
-    </Card>
-  );
-}
-```
-
-**可用的 shadcn 组件清单**
-
-- 表单：`button`, `input`, `textarea`, `select`, `checkbox`, `radio-group`, `switch`, `slider`
-- 布局：`card`, `separator`, `tabs`, `accordion`, `collapsible`, `scroll-area`
-- 反馈：`alert`, `alert-dialog`, `dialog`, `toast`, `sonner`, `progress`
-- 导航：`dropdown-menu`, `menubar`, `navigation-menu`, `context-menu`
-- 数据展示：`table`, `avatar`, `badge`, `hover-card`, `tooltip`, `popover`
-- 其他：`calendar`, `command`, `carousel`, `resizable`, `sidebar`
-
-详见 `src/components/ui/` 目录下的具体组件实现。
-
-### 2. 路由开发
-
-Next.js 使用文件系统路由，在 `src/app/` 目录下创建文件夹即可添加路由：
-
-```bash
-# 创建新路由 /about
-src/app/about/page.tsx
-
-# 创建动态路由 /posts/[id]
-src/app/posts/[id]/page.tsx
-
-# 创建路由组（不影响 URL）
-src/app/(marketing)/about/page.tsx
-
-# 创建 API 路由
-src/app/api/users/route.ts
-```
-
-**页面组件示例**
-
-```tsx
-// src/app/about/page.tsx
-import { Button } from '@/components/ui/button';
-
-export const metadata = {
-  title: '关于我们',
-  description: '关于页面描述',
-};
-
-export default function AboutPage() {
-  return (
-    <div>
-      <h1>关于我们</h1>
-      <Button>了解更多</Button>
-    </div>
-  );
-}
-```
-
-**动态路由示例**
-
-```tsx
-// src/app/posts/[id]/page.tsx
-export default async function PostPage({
-  params,
-}: {
-  params: Promise<{ id: string }>;
-}) {
-  const { id } = await params;
-
-  return <div>文章 ID: {id}</div>;
-}
-```
-
-**API 路由示例**
-
-```tsx
-// src/app/api/users/route.ts
-import { NextResponse } from 'next/server';
-
-export async function GET() {
-  return NextResponse.json({ users: [] });
-}
-
-export async function POST(request: Request) {
-  const body = await request.json();
-  return NextResponse.json({ success: true });
-}
-```
-
-### 3. 依赖管理
-
-**必须使用 pnpm 管理依赖**
-
-```bash
-# ✅ 安装依赖
-pnpm install
-
-# ✅ 添加新依赖
-pnpm add package-name
-
-# ✅ 添加开发依赖
-pnpm add -D package-name
-
-# ❌ 禁止使用 npm 或 yarn
-# npm install  # 错误！
-# yarn add     # 错误！
-```
-
-项目已配置 `preinstall` 脚本，使用其他包管理器会报错。
-
-### 4. 样式开发
-
-**使用 Tailwind CSS v4**
-
-本项目使用 Tailwind CSS v4 进行样式开发，并已配置 shadcn 主题变量。
-
-```tsx
-// 使用 Tailwind 类名
-<div className="flex items-center gap-4 p-4 rounded-lg bg-background">
-  <Button className="bg-primary text-primary-foreground">
-    主要按钮
-  </Button>
-</div>
-
-// 使用 cn() 工具函数合并类名
-import { cn } from '@/lib/utils';
-
-<div className={cn(
-  "base-class",
-  condition && "conditional-class",
-  className
-)}>
-  内容
-</div>
-```
-
-**主题变量**
-
-主题变量定义在 `src/app/globals.css` 中，支持亮色/暗色模式：
-
-- `--background`, `--foreground`
-- `--primary`, `--primary-foreground`
-- `--secondary`, `--secondary-foreground`
-- `--muted`, `--muted-foreground`
-- `--accent`, `--accent-foreground`
-- `--destructive`, `--destructive-foreground`
-- `--border`, `--input`, `--ring`
-
-### 5. 表单开发
-
-推荐使用 `react-hook-form` + `zod` 进行表单开发：
-
-```tsx
-import { useForm } from 'react-hook-form';
-import { zodResolver } from '@hookform/resolvers/zod';
-import * as z from 'zod';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-
-const formSchema = z.object({
-  username: z.string().min(2, '用户名至少 2 个字符'),
-  email: z.string().email('请输入有效的邮箱'),
-});
-
-export default function MyForm() {
-  const form = useForm({
-    resolver: zodResolver(formSchema),
-    defaultValues: { username: '', email: '' },
-  });
-
-  const onSubmit = (data: z.infer<typeof formSchema>) => {
-    console.log(data);
-  };
-
-  return (
-    <form onSubmit={form.handleSubmit(onSubmit)}>
-      <Input {...form.register('username')} />
-      <Input {...form.register('email')} />
-      <Button type="submit">提交</Button>
-    </form>
-  );
-}
-```
-
-### 6. 数据获取
-
-**服务端组件（推荐）**
-
-```tsx
-// src/app/posts/page.tsx
-async function getPosts() {
-  const res = await fetch('https://api.example.com/posts', {
-    cache: 'no-store', // 或 'force-cache'
-  });
-  return res.json();
-}
-
-export default async function PostsPage() {
-  const posts = await getPosts();
-
-  return (
-    <div>
-      {posts.map(post => (
-        <div key={post.id}>{post.title}</div>
-      ))}
-    </div>
-  );
-}
-```
-
-**客户端组件**
-
-```tsx
-'use client';
-
-import { useEffect, useState } from 'react';
-
-export default function ClientComponent() {
-  const [data, setData] = useState(null);
-
-  useEffect(() => {
-    fetch('/api/data')
-      .then(res => res.json())
-      .then(setData);
-  }, []);
-
-  return <div>{JSON.stringify(data)}</div>;
-}
-```
-
-## 常见开发场景
-
-### 添加新页面
-
-1. 在 `src/app/` 下创建文件夹和 `page.tsx`
-2. 使用 shadcn 组件构建 UI
-3. 根据需要添加 `layout.tsx` 和 `loading.tsx`
-
-### 创建业务组件
-
-1. 在 `src/components/` 下创建组件文件（非 UI 组件）
-2. 优先组合使用 `src/components/ui/` 中的基础组件
-3. 使用 TypeScript 定义 Props 类型
-
-### 添加全局状态
-
-推荐使用 React Context 或 Zustand：
-
-```tsx
-// src/lib/store.ts
-import { create } from 'zustand';
-
-interface Store {
-  count: number;
-  increment: () => void;
-}
-
-export const useStore = create<Store>((set) => ({
-  count: 0,
-  increment: () => set((state) => ({ count: state.count + 1 })),
-}));
-```
-
-### 集成数据库
-
-推荐使用 Prisma 或 Drizzle ORM，在 `src/lib/db.ts` 中配置。
-
-## 技术栈
-
-- **框架**: Next.js 16.1.1 (App Router)
-- **UI 组件**: shadcn/ui (基于 Radix UI)
-- **样式**: Tailwind CSS v4
-- **表单**: React Hook Form + Zod
-- **图标**: Lucide React
-- **字体**: Geist Sans & Geist Mono
-- **包管理器**: pnpm 9+
-- **TypeScript**: 5.x
+- 前端：http://localhost:4524
+- 后端：http://localhost:8001
+
+## 环境变量
+
+在 `backend/.env` 中配置（从 `backend/.env.example` 复制）：
+
+| 变量 | 必填 | 说明 |
+|------|------|------|
+| `APIMART_API_KEY` | 是 | apimart.ai 图片生成 API Key |
+| `JWT_SECRET` | 否 | JWT 签名密钥，留空则自动生成 |
+| `API_AUTH_TOKEN` | 否 | 前后端内部通信令牌 |
+| `CORS_ORIGINS` | 否 | 允许的跨域来源（默认 `http://localhost:4524`） |
+| `ADMIN_PASSWORD` | 否 | 管理员密码，留空则自动生成随机密码 |
+| `NODE_ENV` | 否 | `development` / `production` |
+| `COOKIE_SECURE` | 否 | Cookie 是否仅 HTTPS（生产设为 `true`） |
+
+## 管理后台
+
+访问 `/admin/login`，使用管理员账号登录。后台功能：
+
+- **数据看板** — 用户数、生成量、收入统计
+- **用户管理** — 创建/冻结/删除用户、编辑备注
+- **计费管理** — 积分套餐配置、订单审核入账、扣费点数调整
+- **API Key 管理** — 多 Key 轮换、故障自动转移
+- **LLM 配置** — DashScope 模型切换、提示词测试
+- **生成历史** — 全部用户的生成记录查询
+
+## API 概览
+
+### 认证
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/auth/register` | 用户注册 |
+| POST | `/auth/login` | 用户登录 |
+| POST | `/auth/logout` | 退出登录 |
+| GET | `/auth/me` | 当前用户信息 |
+
+### 图片生成
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/generate` | 同步生成（单图测试/对比/详情模式） |
+| POST | `/api/generate/async` | 异步生成（完整 11 张） |
+| GET | `/api/generate/status/{task_id}` | 查询任务状态 |
+| GET | `/api/generate/stream/{task_id}` | SSE 实时进度推送 |
+
+### 用户
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/user/wallet` | 钱包余额 |
+| GET | `/user/packages` | 积分套餐列表 |
+| GET | `/user/history` | 生成历史 |
+| GET | `/user/history/{id}` | 历史详情 |
+| GET/POST | `/user/orders` | 订单列表/创建 |
+
+### 管理
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/admin/dashboard` | 数据看板 |
+| CRUD | `/admin/users` | 用户管理 |
+| CRUD | `/admin/api-keys` | API Key 管理 |
+| CRUD | `/admin/credit-packages` | 积分套餐 |
+| PUT | `/admin/llm-config` | LLM 配置 |
+| PUT | `/admin/generation-cost` | 扣费点数 |
+| PUT | `/admin/change-password` | 修改管理员密码 |
+
+## 开发规范
+
+- **包管理** — 必须使用 pnpm，项目已配置 `preinstall` 脚本拦截 npm/yarn
+- **组件** — 优先使用 `src/components/ui/` 中的 shadcn/ui 组件
+- **类型** — 使用 TypeScript，利用 `@/` 路径别名导入模块
+- **样式** — Tailwind CSS v4，主题变量定义在 `globals.css`
+- **后端** — FastAPI + Pydantic v2，新增接口需添加请求模型和速率限制
 
 ## 参考文档
 
-- [Next.js 官方文档](https://nextjs.org/docs)
-- [shadcn/ui 组件文档](https://ui.shadcn.com)
+- [Next.js 文档](https://nextjs.org/docs)
+- [FastAPI 文档](https://fastapi.tiangolo.com/)
+- [shadcn/ui 文档](https://ui.shadcn.com)
 - [Tailwind CSS 文档](https://tailwindcss.com/docs)
-- [React Hook Form](https://react-hook-form.com)
-
-## 重要提示
-
-1. **必须使用 pnpm** 作为包管理器
-2. **优先使用 shadcn/ui 组件** 而不是从零开发基础组件
-3. **遵循 Next.js App Router 规范**，正确区分服务端/客户端组件
-4. **使用 TypeScript** 进行类型安全开发
-5. **使用 `@/` 路径别名** 导入模块（已配置）
-
----
-
-## 项目组成
-
-### 1. 发财计划 (src/app/page.tsx)
-TikTok Shop九国市场图片生成工具
-- Next.js 前端应用
-- 支持9个国家市场（美国、英国、东南亚等）
-- 一键生成商品模特图 + 爆款标题 + 热门标签
-- 使用 apimart.ai API 生成图片
-
-### 2. Python Skills项目 (projects/)
-
-#### multi-agent-image/
-GPT-Image-2 多Agent图片生成工作流
-- 5阶段工作流：Prompt分析 → 风格决策 → 设计编译 → 生成 → 质量审核
-- 案例库功能
-- 批量生成和系列套图
-- 支持海报、商品图、PPT、信息图、教学图
-
-#### book2startup/
-经典书籍Skills工具箱
-- 孙子兵法Skills（18个框架）
-- 庄子Skills（8个框架）
-- 易经Skills
-- 精益创业Skills
+- [apimart.ai](https://apimart.ai)

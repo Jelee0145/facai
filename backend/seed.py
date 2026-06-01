@@ -24,29 +24,16 @@ if not _admin:
         print("[SEED] CRITICAL: Production requires a strong ADMIN_PASSWORD to create admin!")
         sys.exit(1)
     if not _admin_pw:
-        # Dev: generate random password, write to .env, do NOT print plaintext
+        # Dev: generate random password
         seed_password = secrets.token_urlsafe(16)
-        env_path = os.path.join(os.path.dirname(__file__) or ".", ".env")
-        try:
-            lines = []
-            if os.path.exists(env_path):
-                with open(env_path, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
-            found = False
-            for i, line in enumerate(lines):
-                if line.strip().startswith("ADMIN_PASSWORD="):
-                    lines[i] = f"ADMIN_PASSWORD={seed_password}\n"
-                    found = True
-                    break
-            if not found:
-                lines.append(f"ADMIN_PASSWORD={seed_password}\n")
-            with open(env_path, "w", encoding="utf-8") as f:
-                f.writelines(lines)
-            print("[SEED] Strong password generated and saved to backend/.env")
-        except Exception:
-            print("[SEED] WARNING: Could not save password to .env")
         create_user("admin", hash_password(seed_password))
-        print("[SEED] Admin account created (password written to backend/.env)")
+        print("=" * 60)
+        print(f"[SEED] Admin account created with AUTO-GENERATED password:")
+        print(f"  Username : admin")
+        print(f"  Password : {seed_password}")
+        print(f"[SEED] Please save this password! It will NOT be shown again.")
+        print(f"[SEED] You can also set ADMIN_PASSWORD in .env and restart.")
+        print("=" * 60)
     else:
         create_user("admin", hash_password(_admin_pw))
         print("[SEED] Admin account created from ADMIN_PASSWORD")
@@ -69,7 +56,7 @@ else:
 api_key = os.getenv("APIMART_API_KEY", "")
 if api_key and not get_key_by_value(api_key):
     add_key(api_key, name="默认 Key", daily_limit=200)
-    print(f"[SEED] API Key 已导入: {api_key[:15]}...")
+    print("[SEED] API Key 已导入")
 else:
     print("[SEED] API Key 已存在或为空")
 

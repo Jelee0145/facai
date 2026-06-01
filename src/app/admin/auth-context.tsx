@@ -47,7 +47,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
       if (!resp.ok) {
         const err = (await resp.json().catch(() => ({}))) as Record<string, unknown>;
-        toast.error(String(err.detail || "登录失败"));
+        const detail = err.detail;
+        let msg = "登录失败";
+        if (Array.isArray(detail)) {
+          msg = detail.map((e: Record<string, unknown>) => e.msg || JSON.stringify(e)).join("; ");
+        } else if (typeof detail === "string") {
+          msg = detail;
+        }
+        toast.error(msg);
         return false;
       }
 

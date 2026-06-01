@@ -8,11 +8,12 @@ import asyncio
 import base64
 import json
 import re
+import secrets
 import time
 import os
 import sys
 import uuid
-from typing import Optional
+from typing import Literal, Optional
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -67,6 +68,8 @@ from database import (
     list_user_ledger, list_user_orders, mark_order_paid,
     upsert_credit_package, get_user, create_user, ensure_refund_once,
     mask_api_key, update_admin_password,
+    get_user_history_detail,
+    list_all_users, admin_create_user, update_user_status, update_user_note, delete_user,
 )
 from llm_provider import analyze as llm_analyze, build_llm_messages
 
@@ -234,7 +237,16 @@ async def startup():
                 print("[SECURITY] CRITICAL: Production requires a strong ADMIN_PASSWORD and admin account does not exist!")
                 sys.exit(1)
             else:
-                print("[SECURITY] WARNING: ADMIN_PASSWORD is not set. Admin account not created. Set ADMIN_PASSWORD and restart.")
+                # Dev: auto-generate password and create admin
+                _auto_pw = secrets.token_urlsafe(16)
+                create_user("admin", hash_password(_auto_pw))
+                print("=" * 60)
+                print(f"[INIT] Admin account created with AUTO-GENERATED password:")
+                print(f"  Username : admin")
+                print(f"  Password : {_auto_pw}")
+                print(f"[INIT] Please save this password! It will NOT be shown again.")
+                print(f"[INIT] You can also set ADMIN_PASSWORD in .env and restart.")
+                print("=" * 60)
         else:
             create_user("admin", hash_password(_admin_pw))
             print("[INIT] Admin account created from ADMIN_PASSWORD")
@@ -344,6 +356,8 @@ class GenerateRequest(BaseModel):
     style_index: int = Field(default=0, ge=0, le=10)
     prompt_size: str = Field(default="auto", pattern=r"^(auto|1:1|4:3|3:4|16:9|9:16)$")
     prompt_resolution: str = Field(default="1k", pattern=r"^(1k|2k|4k)$")
+    model_image_count: int = Field(default=4, ge=0, le=9)
+    charge_points: Optional[int] = Field(default=None, ge=1, le=10)
 
 
 class LoginRequest(BaseModel):
@@ -382,14 +396,38 @@ class CreateApiKeyRequest(BaseModel):
     daily_limit: int = Field(default=200, ge=1, le=10000)
 
 
+class AdminCreateUserRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=50)
+    password: str = Field(min_length=12, max_length=128)
+    phone: str = Field(default="", max_length=30)
+    email: str = Field(default="", max_length=120)
+    note: str = Field(default="", max_length=500)
+
+
+class AdminChangePasswordRequest(BaseModel):
+    new_password: str = Field(min_length=1, max_length=128)
+
+
+class AdminUserStatusRequest(BaseModel):
+    status: Literal["active", "frozen"]
+
+
+class AdminUserNoteRequest(BaseModel):
+    note: str = Field(default="", max_length=500)
+
+
 # ========== 进度存储 ==========
 task_store: dict[str, dict] = {}
 _active_tasks: set[str] = set()  # Track running background tasks
 
+MAIN_IMAGE_COUNT = 9
+AUX_IMAGE_COUNT = 2
+TOTAL_GENERATION_IMAGES = MAIN_IMAGE_COUNT + AUX_IMAGE_COUNT
+
 IMAGE_NAMES = [
-    "模特图1", "模特图2", "模特图3", "模特图4", "模特图5",
-    "模特图6", "模特图7", "模特图8", "模特图9", "模特图10", "模特图11",
-    "白底展示图", "竞品对比图", "细节放大图",
+    "主图1", "主图2", "主图3", "主图4", "主图5",
+    "主图6", "主图7", "主图8", "主图9",
+    "局部放大图", "白底对比图",
 ]
 
 
@@ -730,11 +768,27 @@ def _build_tasks_detail(tasks: list[dict], urls: list[str] | None = None) -> str
             "index": i,
             "prompt": task.get("prompt", ""),
             "reference_url": task.get("reference_url", ""),
+            "kind": task.get("kind", ""),
         }
         if urls and i < len(urls):
             entry["result_url"] = urls[i]
         detail.append(entry)
     return json.dumps(detail, ensure_ascii=False)
+
+
+def _split_generation_urls(urls: list[str], model_image_count: int) -> dict:
+    main_images = urls[:MAIN_IMAGE_COUNT]
+    model_count = max(0, min(MAIN_IMAGE_COUNT, int(model_image_count)))
+    detail_image = urls[MAIN_IMAGE_COUNT] if len(urls) > MAIN_IMAGE_COUNT else None
+    comparison_image = urls[MAIN_IMAGE_COUNT + 1] if len(urls) > MAIN_IMAGE_COUNT + 1 else None
+    return {
+        "main_images": main_images,
+        "model_images": main_images[:model_count],
+        "product_images": main_images[model_count:],
+        "detail_image": detail_image,
+        "comparison_image": comparison_image,
+        "model_image_count": model_count,
+    }
 
 
 # ========== API 端点 ==========
@@ -855,6 +909,14 @@ async def user_history(user: dict = Depends(authenticate_customer)):
     return {"items": list_user_history(int(user["id"]))}
 
 
+@app.get("/user/history/{history_id}")
+async def user_history_detail(history_id: int, user: dict = Depends(authenticate_customer)):
+    item = get_user_history_detail(int(user["id"]), history_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    return {"item": item}
+
+
 @app.post("/api/generate")
 @limiter.limit("10/minute")
 async def generate_images(
@@ -866,7 +928,7 @@ async def generate_images(
     start = time.time()
     task_id = str(uuid.uuid4())
     user_id = int(user["id"])
-    charge_points = get_generation_cost_points()
+    charge_points = req.charge_points if req.charge_points is not None else get_generation_cost_points()
     charge_state = {"charged": False, "refunded": False}
 
     try:
@@ -899,7 +961,7 @@ async def generate_images(
         if get_config("llm_api_key"):
             try:
                 llm_messages = build_llm_messages(
-                    image_url=str(req.image_url) if req.image_url else None,
+                    image_url=hosted_image_url if hosted_image_url else None,
                     product_type=req.product_type,
                     country_name=country_config["name"],
                     platform=country_config["platform"],
@@ -910,7 +972,7 @@ async def generate_images(
                 )
                 llm_request_data = json.dumps(llm_messages, ensure_ascii=False)
                 llm_config = await llm_analyze(
-                    image_url=str(req.image_url) if req.image_url else None,
+                    image_url=hosted_image_url if hosted_image_url else None,
                     product_type=req.product_type,
                     country_name=country_config["name"],
                     platform=country_config["platform"],
@@ -957,6 +1019,7 @@ async def generate_images(
                 category=category, country_config=country_config,
                 model_code=model_code, model_profile=model_profile,
                 llm_config=llm_config,
+                model_image_count=req.model_image_count,
             )
             url = await apimart_generate(
                 gen_result["tasks"][idx]["prompt"],
@@ -972,7 +1035,11 @@ async def generate_images(
                         llm_request=llm_request_data, llm_response=llm_response_data,
                         tasks_detail=tasks_detail, charge_points=charge_points,
                         description_snapshot=sanitize_input(gen_result.get("description", req.product_type), 500),
-                        preview_images_json=_preview_images([url]))
+                        preview_images_json=_preview_images([url]),
+                        titles_json=json.dumps(gen_result.get("titles", []), ensure_ascii=False),
+                        tags_json=json.dumps(gen_result.get("tags", []), ensure_ascii=False),
+                        target_audience=gen_result.get("target_audience", ""),
+                        all_images_json=json.dumps([url], ensure_ascii=False))
             return {
                 "success": True,
                 "data": {
@@ -996,34 +1063,43 @@ async def generate_images(
             category=category, country_config=country_config,
             model_code=model_code, model_profile=model_profile,
             llm_config=llm_config,
+            model_image_count=req.model_image_count,
         )
 
         urls = await apimart_batch_generate(gen_result["tasks"], hosted_image_url)
 
-        model_images = urls[:11]
-        white_bg_url = urls[11]
-        comparison_url = urls[12]
-        detail_url = urls[13]
+        split = _split_generation_urls(urls, req.model_image_count)
+        main_images = split["main_images"]
+        model_images = split["model_images"]
+        product_images = split["product_images"]
+        detail_url = split["detail_image"]
+        comparison_url = split["comparison_image"]
 
         elapsed = time.time() - start
         success_count = sum(1 for u in urls if u and not u.startswith("data:"))
         tasks_detail = _build_tasks_detail(gen_result["tasks"], urls)
         add_history(task_id=task_id, api_key_id=None, user_id=user_id, product_type=sanitize_input(req.product_type, 50),
-                    country=sanitize_input(req.country, 20), model=model_code, total_images=14,
+                    country=sanitize_input(req.country, 20), model=model_code, total_images=TOTAL_GENERATION_IMAGES,
                     success_count=success_count, status="completed", elapsed_seconds=round(elapsed, 1),
                     llm_request=llm_request_data, llm_response=llm_response_data,
                     tasks_detail=tasks_detail, charge_points=charge_points,
                     description_snapshot=sanitize_input(gen_result.get("description", req.product_type), 500),
-                    preview_images_json=_preview_images(model_images))
+                    preview_images_json=_preview_images(model_images),
+                    titles_json=json.dumps(gen_result.get("titles", []), ensure_ascii=False),
+                    tags_json=json.dumps(gen_result.get("tags", []), ensure_ascii=False),
+                    target_audience=gen_result.get("target_audience", ""),
+                    all_images_json=json.dumps(main_images, ensure_ascii=False))
         print(f"[DONE] Completed! Elapsed {elapsed:.1f}s")
 
         return {
             "success": True,
             "data": {
             "originalImage": hosted_image_url,
+            "mainImages": main_images,
             "modelImages": model_images,
+            "productImages": product_images,
+            "modelImageCount": split["model_image_count"],
             "modelStyles": MODEL_STYLE_NAMES,
-            "displayImage": white_bg_url,
             "comparisonImage": comparison_url,
             "detailImage": detail_url,
             # 品类信息
@@ -1121,7 +1197,7 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
         if get_config("llm_api_key"):
             try:
                 llm_messages = build_llm_messages(
-                    image_url=str(req.image_url) if req.image_url else None,
+                    image_url=hosted_image_url if hosted_image_url else None,
                     product_type=req.product_type,
                     country_name=country_config["name"],
                     platform=country_config["platform"],
@@ -1132,7 +1208,7 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
                 )
                 llm_request_data = json.dumps(llm_messages, ensure_ascii=False)
                 llm_config = await llm_analyze(
-                    image_url=str(req.image_url) if req.image_url else None,
+                    image_url=hosted_image_url if hosted_image_url else None,
                     product_type=req.product_type,
                     country_name=country_config["name"],
                     platform=country_config["platform"],
@@ -1157,6 +1233,7 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
             model_code=model_code,
             model_profile=model_profile,
             llm_config=llm_config,
+            model_image_count=req.model_image_count,
         )
 
         def on_progress(index: int, url: Optional[str]):
@@ -1193,10 +1270,12 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
         )
 
         # 构建结果
-        model_images = urls[:11]
-        white_bg_url = urls[11]
-        comparison_url = urls[12]
-        detail_url = urls[13]
+        split = _split_generation_urls(urls, req.model_image_count)
+        main_images = split["main_images"]
+        model_images = split["model_images"]
+        product_images = split["product_images"]
+        detail_url = split["detail_image"]
+        comparison_url = split["comparison_image"]
 
         model_profile = get_model_profile(model_code)
 
@@ -1204,9 +1283,11 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
             "success": True,
             "data": {
                 "originalImage": hosted_image_url,
+                "mainImages": main_images,
                 "modelImages": model_images,
+                "productImages": product_images,
+                "modelImageCount": split["model_image_count"],
                 "modelStyles": MODEL_STYLE_NAMES,
-                "displayImage": white_bg_url,
                 "comparisonImage": comparison_url,
                 "detailImage": detail_url,
                 "category": {"name": category["name"], "parent": category["parent"], "shotType": category["shot_type"]},
@@ -1235,7 +1316,7 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
             model=model_code,
             prompt_size=req.prompt_size,
             prompt_resolution=req.prompt_resolution,
-            total_images=14,
+            total_images=TOTAL_GENERATION_IMAGES,
             success_count=progress["completed"],
             status="completed",
             elapsed_seconds=round(time.time() - progress["start_time"], 1),
@@ -1245,6 +1326,10 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
             charge_points=charge_points,
             description_snapshot=sanitize_input(gen_result.get("description", req.product_type), 500),
             preview_images_json=_preview_images(model_images),
+            titles_json=json.dumps(gen_result.get("titles", []), ensure_ascii=False),
+            tags_json=json.dumps(gen_result.get("tags", []), ensure_ascii=False),
+            target_audience=gen_result.get("target_audience", ""),
+            all_images_json=json.dumps(main_images, ensure_ascii=False),
         )
 
     except Exception as e:
@@ -1287,9 +1372,9 @@ async def generate_async(
     validate_image_data(str(req.image_url))
     ensure_api_key_available()
     client_ip = request.client.host if request.client else "unknown"
-    task_id = init_progress(14, creator_ip=client_ip)
+    task_id = init_progress(TOTAL_GENERATION_IMAGES, creator_ip=client_ip)
     user_id = int(user["id"])
-    charge_points = get_generation_cost_points()
+    charge_points = req.charge_points if req.charge_points is not None else get_generation_cost_points()
     try:
         charge_generation(user_id, task_id, charge_points, f"生成任务 {task_id}")
     except ValueError:
@@ -1302,7 +1387,12 @@ async def generate_async(
     task = asyncio.create_task(_run_generation_background(task_id, req, user_id, charge_points))
     task.add_done_callback(lambda t: _cleanup_active_task(task_id, t))
     print(f"[START] Background task created: {task_id} (IP: {client_ip})")
-    return {"task_id": task_id, "charge_points": charge_points}
+    return {
+        "task_id": task_id,
+        "charge_points": charge_points,
+        "total_images": TOTAL_GENERATION_IMAGES,
+        "model_image_count": req.model_image_count,
+    }
 
 
 @app.get("/api/generate/status/{task_id}")
@@ -1499,6 +1589,14 @@ async def modify_api_key(request: Request, key_id: int, req: dict, user: dict = 
         kwargs["is_active"] = int(req["is_active"])
     if "daily_limit" in req:
         kwargs["daily_limit"] = int(req["daily_limit"])
+    if "balance_usd" in req:
+        try:
+            balance = float(req["balance_usd"])
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=422, detail="balance_usd must be a number")
+        if balance < 0:
+            raise HTTPException(status_code=400, detail="balance_usd must be >= 0")
+        kwargs["balance_usd"] = balance
     ok = db_update_key(key_id, **kwargs)
     if not ok:
         raise HTTPException(status_code=404, detail="Key 不存在")
@@ -1604,7 +1702,10 @@ async def admin_update_generation_cost(
     user: dict = Depends(authenticate),
     _csrf=Depends(verify_csrf),
 ):
-    points = int(req.get("points", 10))
+    try:
+        points = int(req.get("points", 10))
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail="points must be an integer")
     if points < 1:
         raise HTTPException(status_code=400, detail="扣费积分必须大于 0")
     set_config("generation_cost_points", str(points))
@@ -1641,6 +1742,128 @@ async def admin_health(user: dict = Depends(authenticate)):
         "task_store_size": len(task_store),
         "keys_health": key_manager.health_check(),
     }
+
+
+# ========== 账号管理端点 ==========
+
+
+@app.get("/admin/users")
+@limiter.limit("30/minute")
+async def admin_list_users(request: Request, user: dict = Depends(authenticate)):
+    """获取所有用户列表"""
+    return {"users": list_all_users()}
+
+
+@app.post("/admin/users")
+@limiter.limit("20/minute")
+async def admin_create_user_endpoint(
+    request: Request,
+    req: AdminCreateUserRequest,
+    user: dict = Depends(authenticate),
+    _csrf=Depends(verify_csrf),
+):
+    """管理员创建新用户"""
+    username = sanitize_input(req.username, 50)
+    phone = sanitize_input(req.phone, 30)
+    email = sanitize_input(req.email, 120)
+    note = sanitize_input(req.note, 500)
+    try:
+        validate_password_strength(req.password)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        user_id = admin_create_user(username, hash_password(req.password), phone=phone, email=email, note=note)
+    except ValueError:
+        raise HTTPException(status_code=409, detail="用户名已存在")
+    return {"id": user_id, "username": username}
+
+
+@app.put("/admin/users/{user_id}/status")
+@limiter.limit("30/minute")
+async def admin_update_user_status(
+    request: Request,
+    user_id: int,
+    req: AdminUserStatusRequest,
+    user: dict = Depends(authenticate),
+    _csrf=Depends(verify_csrf),
+):
+    """冻结/解冻用户"""
+    # 防止管理员冻结/解冻自己
+    # 注意：管理员存在 users 表，get_customer_by_id 查 customers 表，
+    # 对管理员账号返回 None，此检查自然放行；对客户账号则正常拦截自冻操作。
+    from database import get_customer_by_id
+    admin_username = user.get("sub", "")
+    target = get_customer_by_id(user_id)
+    if target and target["username"] == admin_username:
+        raise HTTPException(status_code=400, detail="不能对自己的账号执行此操作")
+    ok = update_user_status(user_id, req.status)
+    if not ok:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    return {"message": "已更新", "status": req.status}
+
+
+@app.put("/admin/users/{user_id}/note")
+@limiter.limit("30/minute")
+async def admin_update_user_note(
+    request: Request,
+    user_id: int,
+    req: AdminUserNoteRequest,
+    user: dict = Depends(authenticate),
+    _csrf=Depends(verify_csrf),
+):
+    """更新用户备注"""
+    note = sanitize_input(req.note, 500)
+    ok = update_user_note(user_id, note)
+    if not ok:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    return {"message": "备注已更新"}
+
+
+@app.delete("/admin/users/{user_id}")
+@limiter.limit("20/minute")
+async def admin_delete_user_endpoint(
+    request: Request,
+    user_id: int,
+    user: dict = Depends(authenticate),
+    _csrf=Depends(verify_csrf),
+):
+    """删除用户"""
+    # 防止管理员删除自己
+    from database import get_customer_by_id
+    admin_username = user.get("sub", "")
+    target = get_customer_by_id(user_id)
+    if target and target["username"] == admin_username:
+        raise HTTPException(status_code=400, detail="不能删除自己的账号")
+    ok = delete_user(user_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    return {"message": "用户已删除"}
+
+
+@app.put("/admin/change-password")
+@limiter.limit("5/minute")
+async def admin_change_password(
+    request: Request,
+    req: AdminChangePasswordRequest,
+    user: dict = Depends(authenticate),
+    _csrf=Depends(verify_csrf),
+):
+    """管理员修改自己的密码"""
+    from database import revoke_jti
+    username = user.get("sub", "")
+    admin = get_user(username)
+    if not admin:
+        raise HTTPException(status_code=404, detail="管理员账号不存在")
+    if not req.new_password.strip():
+        raise HTTPException(status_code=400, detail="密码不能为空")
+    update_admin_password(username, hash_password(req.new_password))
+    # Revoke current token to force re-login
+    if user.get("jti"):
+        exp = user.get("exp", "")
+        revoke_jti(user["jti"], str(exp) if exp else "")
+    resp = JSONResponse(content={"message": "密码修改成功，请重新登录"})
+    resp.set_cookie(key="user_access_token", value="", httponly=True, samesite="lax", path="/", max_age=0, secure=COOKIE_SECURE)
+    return resp
 
 
 # ========== LLM 配置管理端点 ==========

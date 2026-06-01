@@ -21,7 +21,7 @@ if not JWT_SECRET:
     print("[SECURITY] Set it in backend/.env: JWT_SECRET=<the generated value>")
     sys.exit(1)
 JWT_ALGORITHM = "HS256"
-TOKEN_EXPIRE_DAYS = 1
+TOKEN_EXPIRE_DAYS = 7
 JWT_EXPIRE_MINUTES = TOKEN_EXPIRE_DAYS * 24 * 60
 JWT_REFRESH_MINUTES = 7 * 24 * 60  # 刷新 token 有效期 7 天
 BCRYPT_ROUNDS = 12
@@ -169,7 +169,11 @@ async def authenticate_customer(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
 
     user = get_customer_by_id(user_id)
-    if not user or user.get("status") != "active":
+    if not user:
+        raise HTTPException(status_code=401, detail="账号不可用")
+    if user.get("status") == "frozen":
+        raise HTTPException(status_code=403, detail="账户被冻结，请联系管理员")
+    if user.get("status") != "active":
         raise HTTPException(status_code=401, detail="账号不可用")
 
     return {
