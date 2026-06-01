@@ -9,7 +9,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Optional
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "data.db")
+DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(__file__), "data.db"))
 _local = threading.local()
 
 
