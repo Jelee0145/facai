@@ -6,6 +6,7 @@ import sqlite3
 import os
 import threading
 import json
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -13,9 +14,25 @@ DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(__file__), "data.db"
 _local = threading.local()
 
 
+def _wait_for_db_path(path: str, retries: int = 15, delay: float = 2.0):
+    """Wait for the database path to become writable (e.g. Railway volume mount)."""
+    dir_path = os.path.dirname(path) or "."
+    for i in range(retries):
+        try:
+            os.makedirs(dir_path, exist_ok=True)
+        except OSError:
+            pass
+        if os.path.isdir(dir_path) and os.access(dir_path, os.W_OK):
+            return
+        time.sleep(delay)
+    raise RuntimeError(f"Database directory {dir_path} not writable after {retries} retries")
+
+
 def get_db() -> sqlite3.Connection:
     """获取线程安全的数据库连接"""
     if not hasattr(_local, "conn") or _local.conn is None:
+        if not os.path.exists(DB_PATH):
+            _wait_for_db_path(DB_PATH)
         _local.conn = sqlite3.connect(DB_PATH)
         _local.conn.row_factory = sqlite3.Row
         _local.conn.execute("PRAGMA journal_mode=WAL")
