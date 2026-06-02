@@ -760,7 +760,7 @@ export default function HomePage() {
       setSimulatedProgressActive(true);
       setCurrentTaskId(task_id);
     } catch (error) {
-      logger.error("生成失败:", error);
+      logger.warn("生成失败:", error);
       toast.error(error instanceof Error ? error.message : "生成失败，请重试");
       setGenerationStatus("error");
       setIsLoading(false);

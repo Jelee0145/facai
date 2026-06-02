@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 from env_setup import auto_fill_env
 
 auto_fill_env()
-load_dotenv()
+load_dotenv(override=True)
 
 from prompts_v2 import (
     match_category,
@@ -76,6 +76,7 @@ from database import (
     get_user_history_detail,
     list_all_users, admin_create_user, update_user_status, update_user_note, delete_user,
     submit_order_proof, reject_order, get_order_proof,
+    reset_daily_usage,
 )
 from llm_provider import analyze as llm_analyze, build_llm_messages
 
@@ -226,6 +227,14 @@ async def global_exception_handler(request: Request, exc: Exception):
 async def startup():
     """启动时恢复未完成任务，清理过期数据"""
     init_db()
+    # Reset daily usage if it's a new day
+    from datetime import date
+    _last_reset = getattr(startup, "_last_reset_date", None)
+    _today = date.today().isoformat()
+    if _last_reset != _today:
+        reset_daily_usage()
+        startup._last_reset_date = _today
+        print(f"[INIT] Daily usage reset for {_today}")
     # production safety: refuse to start without API_AUTH_TOKEN
     if os.getenv("NODE_ENV", "").lower() == "production" and not API_AUTH_TOKEN:
         print("[SECURITY] CRITICAL: NODE_ENV=production but API_AUTH_TOKEN is not set!")
@@ -1025,7 +1034,29 @@ async def user_logout(request: Request):
 async def user_me(request: Request):
     try:
         user = await authenticate_customer(request)
-    except HTTPException:
+    except HTTPException as e:
+        if e.status_code == 403 and "冻结" in str(e.detail):
+            from security import verify_token
+            from database import get_customer_by_id
+            token = request.cookies.get("user_access_token", "")
+            payload = verify_token(token)
+            if payload:
+                uid = int(payload.get("sub", "0"))
+                frozen_user = get_customer_by_id(uid)
+                if frozen_user:
+                    return {
+                        "user": {
+                            "id": uid,
+                            "username": frozen_user["username"],
+                            "phone": frozen_user.get("phone", ""),
+                            "email": frozen_user.get("email", ""),
+                            "is_unlimited": bool(frozen_user.get("is_unlimited")),
+                            "status": "frozen",
+                        },
+                        "wallet": get_wallet(uid),
+                        "csrf_token": payload.get("jti", ""),
+                        "generation_cost_points": get_generation_cost_points(),
+                    }
         return {"user": None, "wallet": None, "csrf_token": "", "generation_cost_points": get_generation_cost_points()}
     return {
         "user": user,

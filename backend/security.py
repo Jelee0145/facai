@@ -196,7 +196,14 @@ async def login_customer(username: str, password: str) -> dict:
             raise HTTPException(status_code=429, detail=f"账号已被锁定，请 {remaining} 分钟后重试")
 
     user = get_customer_by_username(username)
-    if not user or user.get("status") != "active":
+    if not user:
+        record_customer_login_attempt(username, success=False)
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+
+    if user.get("status") == "frozen":
+        raise HTTPException(status_code=403, detail="账号已被冻结，请联系管理员解封")
+
+    if user.get("status") != "active":
         record_customer_login_attempt(username, success=False)
         raise HTTPException(status_code=401, detail="用户名或密码错误")
 
@@ -260,3 +267,4 @@ def sanitize_input(value: str, max_length: int = 500) -> str:
     if not isinstance(value, str):
         return ""
     return value.strip()[:max_length]
+
