@@ -23,10 +23,7 @@ import httpx
 import traceback
 from dotenv import load_dotenv
 
-# Fill blank secrets before loading .env into the process environment
-from env_setup import auto_fill_env
-
-auto_fill_env()
+# 必须在导入依赖 JWT_SECRET 的模块前加载 .env
 load_dotenv()
 
 from prompts_v2 import (
@@ -76,7 +73,6 @@ from database import (
     get_user_history_detail,
     list_all_users, admin_create_user, update_user_status, update_user_note, delete_user,
     submit_order_proof, reject_order, get_order_proof,
-    get_db,
 )
 from llm_provider import analyze as llm_analyze, build_llm_messages
 
@@ -2037,45 +2033,6 @@ async def admin_health(user: dict = Depends(authenticate)):
 async def admin_list_users(request: Request, user: dict = Depends(authenticate)):
     """获取所有用户列表"""
     return {"users": list_all_users()}
-
-
-@app.post("/admin/users/test")
-@limiter.limit("10/minute")
-async def admin_create_test_user(
-    request: Request,
-    user: dict = Depends(authenticate),
-    _csrf=Depends(verify_csrf),
-):
-    """创建/重置无限积分测试用户"""
-    from database import get_customer_by_username
-    test_user = get_customer_by_username("test")
-    if test_user:
-        db = get_db()
-        db.execute("UPDATE users SET is_unlimited = 1, status = 'active' WHERE id = ?", (test_user["id"],))
-        db.commit()
-        return {"id": test_user["id"], "username": "test", "password": "test123", "existed": True}
-    password = "test123"
-    uid = create_customer("test", hash_password(password))
-    db = get_db()
-    db.execute("UPDATE users SET is_unlimited = 1 WHERE id = ?", (uid,))
-    db.commit()
-    return {"id": uid, "username": "test", "password": password, "existed": False}
-
-
-@app.delete("/admin/users/test")
-@limiter.limit("10/minute")
-async def admin_delete_test_user(
-    request: Request,
-    user: dict = Depends(authenticate),
-    _csrf=Depends(verify_csrf),
-):
-    """删除无限积分测试用户"""
-    from database import get_customer_by_username
-    test_user = get_customer_by_username("test")
-    if not test_user:
-        raise HTTPException(status_code=404, detail="测试用户不存在")
-    delete_user(test_user["id"])
-    return {"deleted": True}
 
 
 @app.post("/admin/users")

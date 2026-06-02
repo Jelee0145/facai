@@ -4,10 +4,6 @@ import sys
 import secrets
 from dotenv import load_dotenv
 
-# Fill blank secrets before loading .env into the process environment
-from env_setup import auto_fill_env
-
-auto_fill_env()
 load_dotenv()
 
 from database import init_db, get_config, set_config, get_user, create_user, update_admin_password
