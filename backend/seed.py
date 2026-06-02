@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from database import init_db, get_key_by_value, add_key, get_config, set_config, get_user, create_user, update_admin_password
+from database import init_db, get_config, set_config, get_user, create_user, update_admin_password
 from security import hash_password, is_valid_password_hash
 
 init_db()
@@ -51,14 +51,6 @@ elif not is_valid_password_hash(_admin.get("password_hash", "")):
             print(msg)
 else:
     print("[SEED] 管理员账号已存在")
-
-# ========== 导入 API Key ==========
-api_key = os.getenv("APIMART_API_KEY", "")
-if api_key and not get_key_by_value(api_key):
-    add_key(api_key, name="默认 Key", daily_limit=200)
-    print("[SEED] API Key 已导入")
-else:
-    print("[SEED] API Key 已存在或为空")
 
 # ========== 导入 LLM 默认配置 ==========
 llm_api_key = os.getenv("LLM_API_KEY", "")

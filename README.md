@@ -73,7 +73,7 @@ git clone <repo-url> && cd projects
 
 ```bash
 cd backend
-cp .env.example .env          # 编辑 .env，填入 APIMART_API_KEY 等
+cp .env.example .env          # 编辑 .env 配置各项参数
 pip install -r requirements.txt
 python main.py                 # 启动在 http://localhost:8001
 ```
@@ -108,7 +108,6 @@ docker compose up -d --build
 
 | 变量 | 必填 | 说明 |
 |------|------|------|
-| `APIMART_API_KEY` | 是 | apimart.ai 图片生成 API Key |
 | `JWT_SECRET` | 否 | JWT 签名密钥，留空则自动生成 |
 | `API_AUTH_TOKEN` | 否 | 前后端内部通信令牌 |
 | `CORS_ORIGINS` | 否 | 允许的跨域来源（默认 `http://localhost:4524`） |

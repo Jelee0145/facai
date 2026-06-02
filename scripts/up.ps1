@@ -94,7 +94,7 @@ function Ensure-EnvFiles {
     if (-not (Test-Path $rootEnv)) {
         if (Test-Path $rootExample) {
             Copy-Item $rootExample $rootEnv
-            Write-Host "  .env created from .env.example. Fill in APIMART_API_KEY." -ForegroundColor Yellow
+            Write-Host "  .env created from .env.example." -ForegroundColor Yellow
         } else {
             Write-Host "  .env and .env.example not found. Create .env manually." -ForegroundColor Red
         }
@@ -110,7 +110,6 @@ function Ensure-EnvFiles {
             $adminPw = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 12 | ForEach-Object { [char]$_ })
             Add-Content -Path $backEnv -Value "`nADMIN_PASSWORD=$adminPw"
             Write-Host "  backend\.env created with random JWT_SECRET and ADMIN_PASSWORD." -ForegroundColor Yellow
-            Write-Host "  Fill in APIMART_API_KEY (currently placeholder)." -ForegroundColor Yellow
         } else {
             Write-Host "  backend\.env and .env.example not found. Create manually." -ForegroundColor Red
         }

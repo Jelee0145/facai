@@ -166,5 +166,5 @@ cd backend && python test_prompts.py
 │   ├── TASKS_v2.md         # v2 任务拆分
 │   ├── SECURITY_UPGRADE.md # 安全升级变更日志
 │   └── DEPLOYMENT_CHECKLIST.md # 部署检查清单
-└── .env                    # APIMART_API_KEY (勿提交到公开仓库)
+└── .env                    # 环境变量 (勿提交到公开仓库)
 ```

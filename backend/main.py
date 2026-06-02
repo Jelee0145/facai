@@ -268,15 +268,6 @@ async def startup():
                     sys.exit(1)
                 else:
                     print(msg)
-    # 自动导入 API Key
-    try:
-        from database import get_key_by_value, add_key
-        api_key = os.getenv("APIMART_API_KEY", "")
-        if api_key and not get_key_by_value(api_key):
-            add_key(api_key, name="默认 Key", daily_limit=200)
-            print(f"[INIT] API Key 已导入")
-    except Exception as e:
-        print(f"[INIT] API Key 导入失败: {e}")
     delete_old_tasks(hours=24)
     pending = load_pending_tasks()
     if pending:
