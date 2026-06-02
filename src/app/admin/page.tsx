@@ -8,12 +8,11 @@ import { logger } from "@/lib/logger";
 interface KeyHealth {
   id: number;
   name: string;
-  today_used: number;
-  daily_limit: number;
   fail_count: number;
-  usage_pct: number;
   balance_usd: number;
+  total_balance_usd: number;
   remaining_quota: number;
+  last_used_at: string | null;
 }
 
 interface DashboardStats {
@@ -121,89 +120,127 @@ export default function DashboardPage() {
 
       <h2 className="text-lg font-semibold mb-4">🔑 Key 使用状态</h2>
       <div className="space-y-3">
-        {(stats.keys_health?.keys || []).map((k: KeyHealth) => (
-          <div key={k.id} className="bg-gray-900 border border-gray-800 rounded-lg p-4">
-            <div className="flex items-center justify-between mb-2">
-              <span className="font-medium">{k.name}</span>
-              <span className={`text-xs px-2 py-1 rounded ${k.fail_count > 0 ? "bg-red-900/50 text-red-400" : "bg-green-900/50 text-green-400"}`}>
-                {k.fail_count > 0 ? `${k.fail_count} 次失败` : "正常"}
-              </span>
-            </div>
-            {k.balance_usd > 0 ? (
-              <div className="flex justify-between text-xs text-gray-400 mt-2">
-                <span>
-                  剩余 <span className="text-purple-400 font-semibold">{k.remaining_quota || 0}</span> 张
-                  <span className="text-gray-500 ml-2">${(k.balance_usd || 0).toFixed(2)}</span>
+        {(stats.keys_health?.keys || []).map((k: KeyHealth) => {
+          const total = k.total_balance_usd || 0;
+          const remaining = k.balance_usd || 0;
+          const balancePct = total > 0 ? Math.min((remaining / total) * 100, 100) : 0;
+          const maxImages = k.remaining_quota || 0;
+          const genPct = maxImages > 0 ? Math.min((stats.today_generations / maxImages) * 100, 100) : 0;
+          const isZeroBalance = remaining <= 0;
+          const isLowBalance = !isZeroBalance && balancePct <= 20;
+          const hasError = k.fail_count > 0;
+
+          const borderColor = hasError
+            ? "border-gray-600"
+            : isZeroBalance ? "border-red-700"
+            : isLowBalance ? "border-amber-700"
+            : "border-gray-800";
+
+          const balanceBarColor = isZeroBalance ? "bg-red-500"
+            : isLowBalance ? "bg-amber-500" : "bg-purple-500";
+
+          const genBarColor = genPct > 80 ? "bg-red-500" : "bg-blue-500";
+
+          const formatLastUsed = (t: string | null): string => {
+            if (!t) return "从未使用";
+            const d = Date.now() - new Date(t).getTime();
+            const m = Math.floor(d / 60000);
+            if (m < 1) return "刚刚";
+            if (m < 60) return `${m} 分钟前`;
+            const h = Math.floor(m / 60);
+            if (h < 24) return `${h} 小时前`;
+            return `${Math.floor(h / 24)} 天前`;
+          };
+
+          return (
+            <div key={k.id} className={`bg-gray-900 border ${borderColor} rounded-lg p-4`}>
+              {/* 第一行：Key 名称 + 健康状态 */}
+              <div className="flex items-center justify-between mb-3">
+                <span className="font-medium">{k.name}</span>
+                <span className={`text-xs px-2 py-1 rounded ${
+                  hasError ? "bg-red-900/50 text-red-400" : "bg-green-900/50 text-green-400"
+                }`}>
+                  {hasError ? `${k.fail_count} 次失败` : "正常"}
                 </span>
               </div>
-            ) : (
-              <>
-                <div className="w-full bg-gray-800 rounded-full h-2 mt-2">
-                  <div
-                    className={`h-2 rounded-full transition-all ${k.usage_pct > 80 ? "bg-red-500" : "bg-purple-500"}`}
-                    style={{ width: `${Math.min(k.usage_pct, 100)}%` }}
-                  />
-                </div>
-                <div className="flex justify-between text-xs text-gray-500 mt-1">
-                  <span>{k.today_used} / {k.daily_limit}</span>
-                  <span>{k.usage_pct}%</span>
-                </div>
-              </>
-            )}
 
-            {/* Balance Information */}
-            <div className="flex items-center justify-between mt-3 pt-3 border-t border-gray-800">
-              {editingKeyId === k.id ? (
-                <div className="flex items-center gap-2 flex-1">
-                  <span className="text-gray-400">$</span>
-                  <input
-                    type="number"
-                    value={balanceInput}
-                    onChange={(e) => setBalanceInput(e.target.value)}
-                    className="w-24 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm text-white focus:outline-none focus:border-purple-500"
-                    min="0"
-                    step="0.01"
-                    autoFocus
-                  />
-                  <span className="text-gray-500 text-xs">
-                    = {Math.floor(parseFloat(balanceInput) / 0.006) || 0} 张
-                  </span>
-                  <button
-                    onClick={submitBalanceUpdate}
-                    className="text-xs px-2 py-1 bg-green-600 hover:bg-green-500 rounded text-white"
-                  >
-                    确认
-                  </button>
-                  <button
-                    onClick={cancelBalanceUpdate}
-                    className="text-xs px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-white"
-                  >
-                    取消
-                  </button>
-                </div>
-              ) : (
-                <>
-                  <div className="text-sm text-gray-400">
-                    <span className="text-green-400 font-semibold">
-                      ${(k.balance_usd || 0).toFixed(2)}
+              {/* 余额信息 + 余额进度条 */}
+              <div className="flex items-baseline gap-2 mb-1">
+                <span className={`font-semibold ${
+                  isZeroBalance ? "text-red-400" : isLowBalance ? "text-amber-400" : "text-green-400"
+                }`}>
+                  ${(k.balance_usd || 0).toFixed(2)}
+                </span>
+                <span className="text-xs text-gray-500">
+                  / ${total.toFixed(2)}  剩余 <span className="text-purple-400 font-semibold">{k.remaining_quota || 0}</span> 张
+                </span>
+              </div>
+              <div className="w-full bg-gray-800 rounded-full h-1.5 mb-3">
+                <div
+                  className={`h-1.5 rounded-full transition-all ${balanceBarColor}`}
+                  style={{ width: `${Math.max(balancePct, isZeroBalance && total === 0 ? 0 : 2)}%` }}
+                />
+              </div>
+
+              {/* 生成进度条 */}
+              <div className="flex items-baseline gap-2 mb-1">
+                <span className="font-semibold text-blue-400">
+                  已生成 {stats.today_generations} 张
+                </span>
+                <span className="text-xs text-gray-500">
+                  / 最多 <span className="text-purple-400 font-semibold">{maxImages}</span> 张
+                </span>
+              </div>
+              <div className="w-full bg-gray-800 rounded-full h-1.5 mb-3">
+                <div
+                  className={`h-1.5 rounded-full transition-all ${genBarColor}`}
+                  style={{ width: `${genPct}%` }}
+                />
+              </div>
+
+              {/* 底部：上次使用 + 设置按钮 */}
+              <div className="flex items-center justify-between text-xs text-gray-500 mt-2 pt-2 border-t border-gray-800">
+                <span>上次使用: {formatLastUsed(k.last_used_at)}</span>
+                {editingKeyId === k.id ? (
+                  <div className="flex items-center gap-2">
+                    <span className="text-gray-400">$</span>
+                    <input
+                      type="number"
+                      value={balanceInput}
+                      onChange={(e) => setBalanceInput(e.target.value)}
+                      className="w-20 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm text-white focus:outline-none focus:border-purple-500"
+                      min="0"
+                      step="0.01"
+                      autoFocus
+                    />
+                    <span className="text-gray-500">
+                      = {Math.floor(parseFloat(balanceInput) / 0.006) || 0} 张
                     </span>
-                    <span className="text-gray-500 ml-2">
-                      剩余 <span className="text-purple-400 font-semibold">
-                        {k.remaining_quota || 0}
-                      </span> 张
-                    </span>
+                    <button
+                      onClick={submitBalanceUpdate}
+                      className="text-xs px-2 py-1 bg-green-600 hover:bg-green-500 rounded text-white"
+                    >
+                      确认
+                    </button>
+                    <button
+                      onClick={cancelBalanceUpdate}
+                      className="text-xs px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-white"
+                    >
+                      取消
+                    </button>
                   </div>
+                ) : (
                   <button
                     onClick={() => handleUpdateBalance(k.id)}
                     className="text-xs px-2 py-1 bg-gray-800 hover:bg-gray-700 rounded"
                   >
                     设置余额
                   </button>
-                </>
-              )}
+                )}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
         {(!stats.keys_health?.keys || stats.keys_health.keys.length === 0) && (
           <div className="text-gray-500 text-center py-4">暂无活跃 Key</div>
         )}

@@ -215,6 +215,8 @@ def init_db():
     key_cols = [r[1] for r in db.execute("PRAGMA table_info('api_keys')").fetchall()]
     if "balance_usd" not in key_cols:
         db.execute("ALTER TABLE api_keys ADD COLUMN balance_usd REAL DEFAULT 0")
+    if "total_balance_usd" not in key_cols:
+        db.execute("ALTER TABLE api_keys ADD COLUMN total_balance_usd REAL DEFAULT 0")
     # Migration: add payment proof fields to orders
     order_cols = [r[1] for r in db.execute("PRAGMA table_info('orders')").fetchall()]
     for col_name, col_def in [
@@ -378,6 +380,7 @@ def update_key(key_id: int, **kwargs) -> bool:
     # Reset daily usage when balance is manually updated
     if "balance_usd" in updates:
         updates["today_used"] = 0
+        updates["total_balance_usd"] = updates["balance_usd"]
     updates["updated_at"] = datetime.now().isoformat()
     set_clause = ", ".join(f"{k} = ?" for k in updates)
     vals = list(updates.values()) + [key_id]

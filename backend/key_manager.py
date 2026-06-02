@@ -3,9 +3,12 @@ API Key 负载均衡管理器
 支持多 Key 轮询、故障自动禁用、每日限额管理
 """
 
+import os
 import threading
 from typing import Optional
 from database import get_active_keys, mark_key_used, mark_key_failed, get_key_by_value
+
+COST_PER_IMAGE_USD = float(os.getenv("COST_PER_IMAGE_USD", "0.006"))
 
 
 class KeyManager:
@@ -39,6 +42,14 @@ class KeyManager:
         if row:
             mark_key_failed(row["id"])
 
+    def deduct_balance(self, key_value: str, image_count: int) -> dict:
+        """生成成功后按实际张数扣减余额"""
+        from database import deduct_key_balance as db_deduct
+        row = get_key_by_value(key_value)
+        if not row:
+            return {"key_id": None, "deducted": 0, "error": "key_not_found"}
+        return db_deduct(row["id"], image_count, COST_PER_IMAGE_USD)
+
     def health_check(self) -> dict:
         """Key 健康状态概览"""
         keys = get_active_keys()
@@ -57,7 +68,9 @@ class KeyManager:
                     "fail_count": k["fail_count"],
                     "usage_pct": round(k["today_used"] / k["daily_limit"] * 100, 1) if k["daily_limit"] else 0,
                     "balance_usd": k.get("balance_usd", 0) or 0,
-                    "remaining_quota": int((k.get("balance_usd", 0) or 0) / 0.006),
+                    "total_balance_usd": k.get("total_balance_usd", 0) or 0,
+                    "remaining_quota": int((k.get("balance_usd", 0) or 0) / COST_PER_IMAGE_USD),
+                    "last_used_at": k.get("last_used_at"),
                 }
                 for k in keys
             ],
