@@ -730,14 +730,14 @@ def list_all_users() -> list[dict]:
     return result
 
 
-def admin_create_user(username: str, password_hash: str, phone: str = "", email: str = "", note: str = "") -> int:
+def admin_create_user(username: str, password_hash: str, phone: str = "", email: str = "", note: str = "", is_unlimited: bool = False) -> int:
     """管理员创建用户 + 自动创建 wallet"""
     db = get_db()
     try:
         cur = db.execute(
-            """INSERT INTO users (username, password_hash, phone, email, note, updated_at)
-               VALUES (?, ?, ?, ?, ?, datetime('now'))""",
-            (username.strip(), password_hash, phone.strip(), email.strip(), note.strip()),
+            """INSERT INTO users (username, password_hash, phone, email, note, is_unlimited, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, datetime('now'))""",
+            (username.strip(), password_hash, phone.strip(), email.strip(), note.strip(), int(is_unlimited)),
         )
         user_id = int(cur.lastrowid)
         db.execute("INSERT INTO user_wallets (user_id) VALUES (?)", (user_id,))

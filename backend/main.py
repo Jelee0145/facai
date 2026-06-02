@@ -342,6 +342,7 @@ MAX_CONCURRENT = 3  # 每次最多 3 个并发请求
 APIMART_INITIAL_WAIT_SECONDS = int(os.getenv("APIMART_INITIAL_WAIT_SECONDS", "15"))
 APIMART_POLL_INTERVAL_SECONDS = int(os.getenv("APIMART_POLL_INTERVAL_SECONDS", "4"))
 APIMART_POLL_TIMEOUT_SECONDS = int(os.getenv("APIMART_POLL_TIMEOUT_SECONDS", "3600"))
+COST_PER_IMAGE_USD = float(os.getenv("COST_PER_IMAGE_USD", "0.006"))
 
 
 # ========== 请求/响应模型 ==========
@@ -403,6 +404,7 @@ class AdminCreateUserRequest(BaseModel):
     phone: str = Field(default="", max_length=30)
     email: str = Field(default="", max_length=120)
     note: str = Field(default="", max_length=500)
+    is_unlimited: bool = Field(default=False)
 
 
 class AdminChangePasswordRequest(BaseModel):
@@ -736,6 +738,7 @@ async def apimart_batch_generate(
     task_ids = [tid for _, tid, _ in submissions]
     task_map = {tid: idx for idx, tid, _ in submissions}
     task_api_keys = {tid: used_key for _, tid, used_key in submissions}
+    task_api_keys_by_pos = {idx: used_key for idx, _, used_key in submissions}
     print(f"\n[PROGRESS] Submitted: {len(task_ids)}/{total}")
 
     if not task_ids:
@@ -833,7 +836,7 @@ async def apimart_batch_generate(
                 if on_progress:
                     on_progress(i, None)
                 print(f"  [WARN] Image {i} generation failed")
-    return final_results
+    return final_results, task_api_keys_by_pos
 
 
 async def _submit_task(task: dict, index: int, total: int) -> tuple[int, str, str]:
@@ -1268,7 +1271,7 @@ async def generate_images(
             model_image_count=req.model_image_count,
         )
 
-        urls = await apimart_batch_generate(gen_result["tasks"])
+        urls, task_api_keys = await apimart_batch_generate(gen_result["tasks"])
 
         split = _split_generation_urls(urls, req.model_image_count)
         main_images = split["main_images"]
@@ -1292,6 +1295,23 @@ async def generate_images(
                     tags_json=json.dumps(tags, ensure_ascii=False),
                     target_audience=gen_result.get("target_audience", ""),
                     all_images_json=json.dumps(main_images, ensure_ascii=False))
+
+        # ---- API Key 余额扣减 ----
+        try:
+            key_success_counts: dict[str, int] = {}
+            for idx, url in enumerate(urls):
+                if url and idx in task_api_keys:
+                    kv = task_api_keys[idx]
+                    key_success_counts[kv] = key_success_counts.get(kv, 0) + 1
+            for key_value, img_count in key_success_counts.items():
+                result = key_manager.deduct_balance(key_value, img_count)
+                if result.get("clamped"):
+                    print(f"[BALANCE] Key {result['key_id']} 余额耗尽，扣除 ${result['deducted']:.4f}，{img_count} 张")
+                else:
+                    print(f"[BALANCE] Key {result['key_id']} 扣除 ${result['deducted']:.4f}（{img_count} 张），余额 ${result['balance_after']:.4f}")
+        except Exception as e:
+            print(f"[BALANCE] 扣减失败（不影响生成）: {e}")
+
         print(f"[DONE] Completed! Elapsed {elapsed:.1f}s")
 
         return {
@@ -1481,7 +1501,7 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
         push_event(task_id, {"status": "generating", "total": progress["total"], "completed": 0})
 
         # 批量生成
-        urls = await apimart_batch_generate(
+        urls, task_api_keys = await apimart_batch_generate(
             gen_result["tasks"], on_progress, on_heartbeat
         )
 
@@ -1566,6 +1586,22 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
             target_audience=gen_result.get("target_audience", ""),
             all_images_json=json.dumps(main_images, ensure_ascii=False),
         )
+
+        # ---- API Key 余额扣减 ----
+        try:
+            key_success_counts: dict[str, int] = {}
+            for idx, url in enumerate(urls):
+                if url and idx in task_api_keys:
+                    kv = task_api_keys[idx]
+                    key_success_counts[kv] = key_success_counts.get(kv, 0) + 1
+            for key_value, img_count in key_success_counts.items():
+                result = key_manager.deduct_balance(key_value, img_count)
+                if result.get("clamped"):
+                    print(f"[BALANCE] Key {result['key_id']} 余额耗尽，扣除 ${result['deducted']:.4f}，{img_count} 张")
+                else:
+                    print(f"[BALANCE] Key {result['key_id']} 扣除 ${result['deducted']:.4f}（{img_count} 张），余额 ${result['balance_after']:.4f}")
+        except Exception as e:
+            print(f"[BALANCE] 扣减失败（不影响生成）: {e}")
 
     except Exception as e:
         print(f"[ERROR] Background task {task_id} failed: {e}")
@@ -2051,7 +2087,7 @@ async def admin_create_user_endpoint(
     if not req.password:
         raise HTTPException(status_code=400, detail="密码不能为空")
     try:
-        user_id = admin_create_user(username, hash_password(req.password), phone=phone, email=email, note=note)
+        user_id = admin_create_user(username, hash_password(req.password), phone=phone, email=email, note=note, is_unlimited=req.is_unlimited)
     except ValueError:
         raise HTTPException(status_code=409, detail="用户名已存在")
     return {"id": user_id, "username": username}

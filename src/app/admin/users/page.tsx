@@ -42,6 +42,7 @@ export default function UsersPage() {
     phone: "",
     email: "",
     note: "",
+    is_unlimited: false,
   });
   const [creating, setCreating] = useState(false);
 
@@ -101,7 +102,7 @@ export default function UsersPage() {
       }
       toast.success("用户创建成功");
       setShowCreate(false);
-      setCreateForm({ username: "", password: "", phone: "", email: "", note: "" });
+      setCreateForm({ username: "", password: "", phone: "", email: "", note: "", is_unlimited: false });
       load();
     } catch {
       toast.error("网络错误");
@@ -272,6 +273,15 @@ export default function UsersPage() {
             onChange={(e) => setCreateForm({ ...createForm, note: e.target.value })}
             className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm"
           />
+          <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer w-fit">
+            <input
+              type="checkbox"
+              checked={createForm.is_unlimited}
+              onChange={(e) => setCreateForm({ ...createForm, is_unlimited: e.target.checked })}
+              className="rounded border-gray-600 text-purple-500 focus:ring-purple-500"
+            />
+            无限积分（测试用户）
+          </label>
           <div className="flex gap-2">
             <button
               onClick={handleCreate}
