@@ -427,6 +427,28 @@ def mark_key_failed(key_id: int):
             print(f"[KEY] API Key {key_id} disabled after {row['fail_count']} consecutive failures")
 
 
+def deduct_key_balance(key_id: int, image_count: int, cost_per_image: float = 0.006) -> dict:
+    """原子扣减 API Key 的 balance_usd，余额不低于 0"""
+    db = get_db()
+    deduction = round(image_count * cost_per_image, 6)
+    if deduction <= 0:
+        return {"key_id": key_id, "deducted": 0, "balance_after": 0, "clamped": False}
+
+    db.execute(
+        """UPDATE api_keys
+           SET balance_usd = MAX(balance_usd - ?, 0),
+               updated_at = datetime('now')
+           WHERE id = ?""",
+        (deduction, key_id),
+    )
+    db.commit()
+
+    row = db.execute("SELECT balance_usd FROM api_keys WHERE id = ?", (key_id,)).fetchone()
+    balance_after = float(row["balance_usd"]) if row else 0.0
+    clamped = balance_after == 0 and deduction > 0
+    return {"key_id": key_id, "deducted": deduction, "balance_after": balance_after, "clamped": clamped}
+
+
 def reset_daily_usage():
     db = get_db()
     db.execute("UPDATE api_keys SET today_used = 0")
@@ -730,14 +752,14 @@ def list_all_users() -> list[dict]:
     return result
 
 
-def admin_create_user(username: str, password_hash: str, phone: str = "", email: str = "", note: str = "") -> int:
+def admin_create_user(username: str, password_hash: str, phone: str = "", email: str = "", note: str = "", is_unlimited: bool = False) -> int:
     """管理员创建用户 + 自动创建 wallet"""
     db = get_db()
     try:
         cur = db.execute(
-            """INSERT INTO users (username, password_hash, phone, email, note, updated_at)
-               VALUES (?, ?, ?, ?, ?, datetime('now'))""",
-            (username.strip(), password_hash, phone.strip(), email.strip(), note.strip()),
+            """INSERT INTO users (username, password_hash, phone, email, note, is_unlimited, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, datetime('now'))""",
+            (username.strip(), password_hash, phone.strip(), email.strip(), note.strip(), int(is_unlimited)),
         )
         user_id = int(cur.lastrowid)
         db.execute("INSERT INTO user_wallets (user_id) VALUES (?)", (user_id,))

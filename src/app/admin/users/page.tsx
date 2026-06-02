@@ -45,6 +45,11 @@ export default function UsersPage() {
   });
   const [creating, setCreating] = useState(false);
 
+  // 测试用户弹窗
+  const [showTestUser, setShowTestUser] = useState(false);
+  const [testUserCreds, setTestUserCreds] = useState<{ username: string; password: string } | null>(null);
+  const [testUserLoading, setTestUserLoading] = useState(false);
+
   // 详情弹窗
   const [detailUser, setDetailUser] = useState<UserItem | null>(null);
 
@@ -107,6 +112,46 @@ export default function UsersPage() {
       toast.error("网络错误");
     } finally {
       setCreating(false);
+    }
+  };
+
+  // 生成测试用户
+  const handleCreateTestUser = async () => {
+    setTestUserLoading(true);
+    try {
+      const r = await fetchWithAuth("/api/admin/users/test", { method: "POST" });
+      if (!r.ok) {
+        const err: Record<string, unknown> = await r.json().catch(() => ({}));
+        toast.error(extractError(err, "创建失败"));
+        return;
+      }
+      const data = (await r.json()) as { username: string; password: string; existed: boolean };
+      setTestUserCreds({ username: data.username, password: data.password });
+      toast.success(data.existed ? "测试用户已重置" : "测试用户已创建");
+      load();
+    } catch {
+      toast.error("网络错误");
+    } finally {
+      setTestUserLoading(false);
+    }
+  };
+
+  // 销毁测试用户
+  const handleDeleteTestUser = async () => {
+    if (!confirm("确定销毁测试用户？此操作不可撤销。")) return;
+    try {
+      const r = await fetchWithAuth("/api/admin/users/test", { method: "DELETE" });
+      if (!r.ok) {
+        const err: Record<string, unknown> = await r.json().catch(() => ({}));
+        toast.error(extractError(err, "销毁失败"));
+        return;
+      }
+      setTestUserCreds(null);
+      setShowTestUser(false);
+      toast.success("测试用户已销毁");
+      load();
+    } catch {
+      toast.error("网络错误");
     }
   };
 
@@ -217,6 +262,12 @@ export default function UsersPage() {
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold">👥 账号管理</h1>
         <div className="flex gap-3">
+          <button
+            onClick={() => setShowTestUser(true)}
+            className="px-4 py-2 bg-amber-700 hover:bg-amber-600 rounded-lg text-sm font-medium"
+          >
+            🧪 测试用户
+          </button>
           <button
             onClick={() => setShowChangePwd(true)}
             className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm font-medium"
@@ -593,6 +644,80 @@ export default function UsersPage() {
                 取消
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* 测试用户弹窗 */}
+      {showTestUser && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={(e) => {
+          if (e.target !== e.currentTarget) return;
+          setShowTestUser(false);
+          setTestUserCreds(null);
+        }}>
+          <div
+            className="bg-gray-900 border border-gray-800 rounded-xl p-6 w-full max-w-md space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-bold">🧪 无限积分测试用户</h2>
+              <button
+                onClick={() => { setShowTestUser(false); setTestUserCreds(null); }}
+                className="text-gray-500 hover:text-white text-xl"
+              >
+                ✕
+              </button>
+            </div>
+            {testUserCreds ? (
+              <div className="space-y-3 text-sm">
+                <div className="bg-yellow-900/30 border border-yellow-800 rounded-lg p-3 text-yellow-400">
+                  测试用户已创建，可用于前台功能测试
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-400">用户名</span>
+                  <span className="font-mono">{testUserCreds.username}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-400">密码</span>
+                  <span className="font-mono">{testUserCreds.password}</span>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleDeleteTestUser}
+                    className="px-4 py-2 bg-red-600 hover:bg-red-700 rounded-lg text-sm"
+                  >
+                    销毁测试用户
+                  </button>
+                  <button
+                    onClick={() => { setShowTestUser(false); }}
+                    className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm"
+                  >
+                    关闭
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <p className="text-sm text-gray-400">
+                  创建一个用户名为 <code className="font-mono bg-gray-800 px-1.5 py-0.5 rounded">test</code>、密码为 <code className="font-mono bg-gray-800 px-1.5 py-0.5 rounded">test123</code> 的无限积分用户，用于前台功能测试。
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleCreateTestUser}
+                    disabled={testUserLoading}
+                    className="px-4 py-2 bg-amber-600 hover:bg-amber-700 rounded-lg text-sm disabled:opacity-50"
+                  >
+                    {testUserLoading ? "创建中..." : "创建"}
+                  </button>
+                  <button
+                    onClick={() => setShowTestUser(false)}
+                    className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm"
+                  >
+                    取消
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
