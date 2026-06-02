@@ -23,7 +23,10 @@ import httpx
 import traceback
 from dotenv import load_dotenv
 
-# 必须在导入依赖 JWT_SECRET 的模块前加载 .env
+# Fill blank secrets before loading .env into the process environment
+from env_setup import auto_fill_env
+
+auto_fill_env()
 load_dotenv()
 
 from prompts_v2 import (
