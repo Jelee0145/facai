@@ -23,6 +23,12 @@ interface OrderItem {
   amount_fen: number;
   points: number;
   status: string;
+  payment_remark?: string;
+  proof_image?: string;
+  submitted_at?: string;
+  reviewed_at?: string;
+  reviewer_note?: string;
+  reject_reason?: string;
   created_at: string;
 }
 
@@ -42,6 +48,16 @@ const emptyForm: PackageForm = {
   sort_order: "",
 };
 
+const STATUS_MAP: Record<string, { label: string; bg: string; text: string }> = {
+  pending: { label: "待支付", bg: "bg-blue-900/60", text: "text-blue-300" },
+  submitted: { label: "待审核", bg: "bg-yellow-900/60", text: "text-yellow-300" },
+  paid: { label: "已支付", bg: "bg-green-900/60", text: "text-green-300" },
+  credited: { label: "已入账", bg: "bg-green-900/60", text: "text-green-300" },
+  rejected: { label: "已驳回", bg: "bg-red-900/60", text: "text-red-300" },
+};
+
+const proofUrl = (path: string) => `/api/proof-image?path=${encodeURIComponent(path)}`;
+
 export default function BillingPage() {
   const { fetchWithAuth } = useAuth();
   const [packages, setPackages] = useState<CreditPackage[]>([]);
@@ -51,6 +67,11 @@ export default function BillingPage() {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [mutating, setMutating] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [rejectTarget, setRejectTarget] = useState<OrderItem | null>(null);
+  const [rejectReason, setRejectReason] = useState("");
+  const [reviewerNote, setReviewerNote] = useState("");
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
 
   const load = () => {
     setLoading(true);
@@ -188,17 +209,58 @@ export default function BillingPage() {
   const markPaid = async (orderNo: string) => {
     setMutating(true);
     try {
-      const r = await fetchWithAuth(`/api/admin/orders/${orderNo}/mark-paid`, { method: "POST" });
+      const r = await fetchWithAuth(`/api/admin/orders/${orderNo}/mark-paid`, {
+        method: "POST",
+        body: JSON.stringify({ reviewer_note: reviewerNote }),
+      });
       if (!r.ok) {
         toast.error("订单入账失败");
         return;
       }
       toast.success("订单已入账");
+      setReviewerNote("");
       load();
     } finally {
       setMutating(false);
     }
   };
+
+  const rejectOrder = async () => {
+    if (!rejectTarget || !rejectReason.trim()) return;
+    setMutating(true);
+    try {
+      const r = await fetchWithAuth(`/api/admin/orders/${rejectTarget.order_no}/reject`, {
+        method: "POST",
+        body: JSON.stringify({ reject_reason: rejectReason.trim() }),
+      });
+      if (!r.ok) {
+        const data = await r.json().catch(() => ({}));
+        toast.error(String(data.detail || "驳回失败"));
+        return;
+      }
+      toast.success("订单已驳回");
+      setRejectTarget(null);
+      setRejectReason("");
+      load();
+    } finally {
+      setMutating(false);
+    }
+  };
+
+  const filteredOrders = statusFilter === "all"
+    ? orders
+    : orders.filter((o) => o.status === statusFilter);
+
+  // Sort: submitted first, then by created_at desc
+  const sortedOrders = [...filteredOrders].sort((a, b) => {
+    const priority: Record<string, number> = { submitted: 0, pending: 1, rejected: 2, paid: 3, credited: 4 };
+    const pa = priority[a.status] ?? 5;
+    const pb = priority[b.status] ?? 5;
+    if (pa !== pb) return pa - pb;
+    return b.created_at.localeCompare(a.created_at);
+  });
+
+  const submittedCount = orders.filter((o) => o.status === "submitted").length;
 
   return (
     <div className="space-y-8">
@@ -365,7 +427,53 @@ export default function BillingPage() {
 
       {/* 充值订单 */}
       <section className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
-        <div className="p-4 font-semibold">充值订单</div>
+        <div className="p-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <span className="font-semibold">充值订单</span>
+            {submittedCount > 0 && (
+              <span className="px-2 py-0.5 bg-yellow-900/80 text-yellow-300 text-xs rounded-full font-medium">
+                {submittedCount} 条待审核
+              </span>
+            )}
+          </div>
+          <div className="flex gap-1">
+            {[
+              { key: "all", label: "全部" },
+              { key: "submitted", label: "待审核" },
+              { key: "pending", label: "待支付" },
+              { key: "rejected", label: "已驳回" },
+              { key: "credited", label: "已入账" },
+            ].map((f) => (
+              <button
+                key={f.key}
+                onClick={() => setStatusFilter(f.key)}
+                className={`px-3 py-1 text-xs rounded ${
+                  statusFilter === f.key
+                    ? "bg-purple-600 text-white"
+                    : "bg-gray-800 text-gray-400 hover:bg-gray-700"
+                }`}
+              >
+                {f.label}
+                {f.key === "submitted" && submittedCount > 0 && ` (${submittedCount})`}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* 审核备注输入 */}
+        <div className="px-4 pb-3">
+          <div className="flex items-center gap-2">
+            <label className="text-gray-400 text-xs whitespace-nowrap">审核备注:</label>
+            <input
+              type="text"
+              value={reviewerNote}
+              onChange={(e) => setReviewerNote(e.target.value)}
+              placeholder="可选，入账时附带备注"
+              className="flex-1 px-2 py-1 bg-gray-800 border border-gray-700 rounded text-white text-xs placeholder:text-gray-600"
+            />
+          </div>
+        </div>
+
         <table className="w-full text-sm">
           <thead className="bg-gray-800/50 text-gray-400">
             <tr>
@@ -375,33 +483,147 @@ export default function BillingPage() {
               <th className="px-4 py-3 text-left">金额</th>
               <th className="px-4 py-3 text-left">积分</th>
               <th className="px-4 py-3 text-left">状态</th>
+              <th className="px-4 py-3 text-left">凭证</th>
               <th className="px-4 py-3 text-left">操作</th>
             </tr>
           </thead>
           <tbody>
-            {orders.map((order) => (
-              <tr key={order.id} className="border-t border-gray-800">
-                <td className="px-4 py-3 font-mono text-xs">{order.order_no}</td>
-                <td className="px-4 py-3">{order.username || "-"}</td>
-                <td className="px-4 py-3">{order.package_name || "-"}</td>
-                <td className="px-4 py-3">¥{(order.amount_fen / 100).toFixed(2)}</td>
-                <td className="px-4 py-3">{order.points}</td>
-                <td className="px-4 py-3">{order.status}</td>
-                <td className="px-4 py-3">
-                  {order.status !== "credited" && (
-                    <button onClick={() => markPaid(order.order_no)} disabled={mutating} className="px-3 py-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 rounded text-xs">
-                      标记支付并入账
-                    </button>
-                  )}
-                </td>
-              </tr>
-            ))}
-            {orders.length === 0 && (
-              <tr><td colSpan={7} className="px-4 py-8 text-center text-gray-500">暂无订单</td></tr>
+            {sortedOrders.map((order) => {
+              const st = STATUS_MAP[order.status] || { label: order.status, bg: "bg-gray-800", text: "text-gray-300" };
+              return (
+                <tr key={order.id} className={`border-t border-gray-800 ${order.status === "submitted" ? "bg-yellow-900/10" : ""}`}>
+                  <td className="px-4 py-3 font-mono text-xs">{order.order_no}</td>
+                  <td className="px-4 py-3">{order.username || "-"}</td>
+                  <td className="px-4 py-3">{order.package_name || "-"}</td>
+                  <td className="px-4 py-3">¥{(order.amount_fen / 100).toFixed(2)}</td>
+                  <td className="px-4 py-3">{order.points}</td>
+                  <td className="px-4 py-3">
+                    <span className={`text-xs px-2 py-0.5 rounded ${st.bg} ${st.text}`}>
+                      {st.label}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3">
+                    {order.status === "submitted" || order.status === "credited" || order.proof_image ? (
+                      <div className="flex flex-col gap-1 text-xs max-w-48">
+                        {order.payment_remark && (
+                          <div className="text-gray-400 truncate" title={order.payment_remark}>
+                            备注: {order.payment_remark}
+                          </div>
+                        )}
+                        {order.proof_image && (
+                          <button
+                            onClick={() => setPreviewImage(proofUrl(order.proof_image!))}
+                            className="text-purple-400 hover:underline text-left"
+                          >
+                            查看截图
+                          </button>
+                        )}
+                        {order.submitted_at && (
+                          <div className="text-gray-500 text-[10px]">
+                            提交: {order.submitted_at.replace("T", " ").slice(0, 19)}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <span className="text-gray-600 text-xs">-</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="flex gap-2">
+                      {(order.status === "submitted" || order.status === "pending") && (
+                        <>
+                          <button
+                            onClick={() => markPaid(order.order_no)}
+                            disabled={mutating}
+                            className="px-3 py-1 bg-green-600 hover:bg-green-700 disabled:opacity-50 rounded text-xs"
+                          >
+                            确认入账
+                          </button>
+                          <button
+                            onClick={() => { setRejectTarget(order); setRejectReason(""); }}
+                            disabled={mutating}
+                            className="px-3 py-1 bg-red-800 hover:bg-red-700 disabled:opacity-50 rounded text-xs text-red-200"
+                          >
+                            驳回
+                          </button>
+                        </>
+                      )}
+                      {order.status === "credited" && order.reviewer_note && (
+                        <span className="text-gray-500 text-xs" title={order.reviewer_note}>
+                          备注: {order.reviewer_note}
+                        </span>
+                      )}
+                      {order.status === "rejected" && order.reject_reason && (
+                        <span className="text-red-400 text-xs" title={order.reject_reason}>
+                          原因: {order.reject_reason}
+                        </span>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+            {sortedOrders.length === 0 && (
+              <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-500">暂无订单</td></tr>
             )}
           </tbody>
         </table>
       </section>
+
+      {/* 驳回弹窗 */}
+      {rejectTarget && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-gray-900 border border-gray-700 rounded-xl p-6 w-full max-w-md space-y-4">
+            <h3 className="text-lg font-semibold">驳回订单</h3>
+            <div className="text-sm text-gray-400">
+              订单号: <span className="font-mono text-white">{rejectTarget.order_no}</span>
+            </div>
+            <div className="text-sm text-gray-400">
+              用户: {rejectTarget.username} · ¥{(rejectTarget.amount_fen / 100).toFixed(2)}
+            </div>
+            {rejectTarget.payment_remark && (
+              <div className="text-sm text-gray-400">
+                付款备注: {rejectTarget.payment_remark}
+              </div>
+            )}
+            <div>
+              <label className="block text-sm text-gray-400 mb-1">驳回原因 <span className="text-red-400">*</span></label>
+              <textarea
+                value={rejectReason}
+                onChange={(e) => setRejectReason(e.target.value)}
+                placeholder="请说明驳回原因，用户将看到此信息"
+                rows={3}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm placeholder:text-gray-500 resize-none"
+              />
+            </div>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => { setRejectTarget(null); setRejectReason(""); }}
+                className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm"
+              >
+                取消
+              </button>
+              <button
+                onClick={rejectOrder}
+                disabled={mutating || !rejectReason.trim()}
+                className="px-4 py-2 bg-red-600 hover:bg-red-700 disabled:opacity-50 rounded-lg text-sm"
+              >
+                确认驳回
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 图片预览 */}
+      {previewImage && (
+        <div
+          className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 cursor-pointer"
+          onClick={() => setPreviewImage(null)}
+        >
+          <img src={previewImage} alt="付款凭证" className="max-w-full max-h-[90vh] rounded-lg shadow-2xl" />
+        </div>
+      )}
     </div>
   );
 }

@@ -14,9 +14,10 @@ import os
 import sys
 import uuid
 from typing import Literal, Optional
-from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi import FastAPI, HTTPException, Request, Depends, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import httpx
 import traceback
@@ -71,6 +72,7 @@ from database import (
     mask_api_key, update_admin_password,
     get_user_history_detail,
     list_all_users, admin_create_user, update_user_status, update_user_note, delete_user,
+    submit_order_proof, reject_order, get_order_proof,
 )
 from llm_provider import analyze as llm_analyze, build_llm_messages
 
@@ -339,6 +341,10 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization", "Cookie"],
 )
 
+# Static file serving for payment proof uploads
+os.makedirs(os.path.join(os.path.dirname(__file__), "uploads", "proofs"), exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "uploads")), name="uploads")
+
 # ========== Apimart 配置 ==========
 APIMART_BASE = "https://api.apimart.ai/v1"
 MAX_CONCURRENT = 3  # 每次最多 3 个并发请求
@@ -402,7 +408,7 @@ class CreateApiKeyRequest(BaseModel):
 
 class AdminCreateUserRequest(BaseModel):
     username: str = Field(min_length=3, max_length=50)
-    password: str = Field(min_length=12, max_length=128)
+    password: str = Field(min_length=1, max_length=128)
     phone: str = Field(default="", max_length=30)
     email: str = Field(default="", max_length=120)
     note: str = Field(default="", max_length=500)
@@ -1046,17 +1052,61 @@ async def user_packages():
 @limiter.limit("20/minute")
 async def user_create_order(request: Request, req: CreateOrderRequest, user: dict = Depends(authenticate_customer)):
     _verify_user_csrf(request, user)
-    order_no = f"MOCK{int(time.time())}{uuid.uuid4().hex[:8].upper()}"
+    order_no = f"PAY{int(time.time())}{uuid.uuid4().hex[:8].upper()}"
     try:
         order = create_order(int(user["id"]), req.package_id, order_no)
     except ValueError:
         raise HTTPException(status_code=404, detail="套餐不存在或已下架")
-    return {"order": order, "payment": {"provider": "mock", "status": "pending"}}
+    return {"order": order, "payment": {"provider": "manual", "status": "pending"}}
 
 
 @app.get("/user/orders")
 async def user_orders(user: dict = Depends(authenticate_customer)):
     return {"orders": list_user_orders(int(user["id"]))}
+
+
+PROOF_MAX_SIZE = 5 * 1024 * 1024  # 5MB
+PROOF_ALLOWED_MIMES = {"image/jpeg", "image/png", "image/webp"}
+
+
+@app.post("/user/orders/{order_no}/submit-proof")
+@limiter.limit("10/minute")
+async def user_submit_proof(
+    request: Request,
+    order_no: str,
+    user: dict = Depends(authenticate_customer),
+    payment_remark: str = Form(""),
+    proof_image: Optional[UploadFile] = File(None),
+):
+    _verify_user_csrf(request, user)
+    safe_order_no = sanitize_input(order_no, 40)
+    saved_path = ""
+    if proof_image:
+        if proof_image.content_type not in PROOF_ALLOWED_MIMES:
+            raise HTTPException(status_code=400, detail="仅支持 JPG/PNG/WebP 格式图片")
+        content = await proof_image.read()
+        if len(content) > PROOF_MAX_SIZE:
+            raise HTTPException(status_code=400, detail="图片大小不能超过 5MB")
+        proofs_dir = os.path.join(os.path.dirname(__file__), "uploads", "proofs")
+        os.makedirs(proofs_dir, exist_ok=True)
+        raw_ext = proof_image.filename.rsplit(".", 1)[-1].lower() if proof_image.filename and "." in proof_image.filename else ""
+        ext = raw_ext if raw_ext in ("jpg", "jpeg", "png", "webp") else "png"
+        filename = f"{safe_order_no}_{int(time.time())}.{ext}"
+        file_path = os.path.join(proofs_dir, filename)
+        with open(file_path, "wb") as f:
+            f.write(content)
+        saved_path = f"/uploads/proofs/{filename}"
+    if not payment_remark.strip() and not saved_path:
+        raise HTTPException(status_code=400, detail="请至少填写付款备注或上传截图")
+    try:
+        order = submit_order_proof(safe_order_no, int(user["id"]), payment_remark.strip(), saved_path)
+    except ValueError as e:
+        if str(e) == "order_not_found":
+            raise HTTPException(status_code=404, detail="订单不存在")
+        if str(e) == "order_not_submittable":
+            raise HTTPException(status_code=400, detail="订单当前状态不可提交凭证")
+        raise
+    return {"order": order}
 
 
 @app.get("/user/ledger")
@@ -1934,13 +1984,41 @@ async def admin_orders(user: dict = Depends(authenticate)):
 async def admin_mark_order_paid(
     request: Request,
     order_no: str,
+    req: dict = {},
     user: dict = Depends(authenticate),
     _csrf=Depends(verify_csrf),
 ):
     try:
-        order = mark_order_paid(sanitize_input(order_no, 80), provider_trade_no=f"mock-{uuid.uuid4().hex[:10]}")
+        order = mark_order_paid(
+            sanitize_input(order_no, 80),
+            provider_trade_no=f"manual-{uuid.uuid4().hex[:10]}",
+            reviewer_note=str(req.get("reviewer_note", "")),
+        )
     except ValueError:
         raise HTTPException(status_code=404, detail="订单不存在或状态不可入账")
+    return {"order": order}
+
+
+@app.post("/admin/orders/{order_no}/reject")
+@limiter.limit("20/minute")
+async def admin_reject_order(
+    request: Request,
+    order_no: str,
+    req: dict,
+    user: dict = Depends(authenticate),
+    _csrf=Depends(verify_csrf),
+):
+    reason = str(req.get("reject_reason", "")).strip()
+    if not reason:
+        raise HTTPException(status_code=422, detail="驳回原因不能为空")
+    try:
+        order = reject_order(sanitize_input(order_no, 80), sanitize_input(reason, 500))
+    except ValueError as e:
+        if str(e) == "order_not_found":
+            raise HTTPException(status_code=404, detail="订单不存在")
+        if str(e) == "order_not_rejectable":
+            raise HTTPException(status_code=400, detail="订单当前状态不可驳回")
+        raise
     return {"order": order}
 
 
@@ -1974,15 +2052,13 @@ async def admin_create_user_endpoint(
     user: dict = Depends(authenticate),
     _csrf=Depends(verify_csrf),
 ):
-    """管理员创建新用户"""
+    """管理员创建新用户（无需密码强校验）"""
     username = sanitize_input(req.username, 50)
     phone = sanitize_input(req.phone, 30)
     email = sanitize_input(req.email, 120)
     note = sanitize_input(req.note, 500)
-    try:
-        validate_password_strength(req.password)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    if not req.password:
+        raise HTTPException(status_code=400, detail="密码不能为空")
     try:
         user_id = admin_create_user(username, hash_password(req.password), phone=phone, email=email, note=note)
     except ValueError:

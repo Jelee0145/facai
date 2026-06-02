@@ -113,6 +113,9 @@ backend/data.db
 *.db-shm
 *.db-wal
 
+# User uploads
+backend/uploads/
+
 # Python
 __pycache__/
 *.pyc

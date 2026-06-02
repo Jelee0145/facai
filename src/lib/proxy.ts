@@ -97,11 +97,21 @@ export async function proxyToBackend(
     const fetchOptions: RequestInit = { method, headers };
 
     if (["POST", "PUT"].includes(method)) {
-      const body = await request.text();
-      if (body.length > MAX_BODY_SIZE) {
-        return NextResponse.json({ error: "Request body too large" }, { status: 413 });
+      const contentType = request.headers.get("content-type") || "";
+      if (contentType.includes("multipart/form-data")) {
+        // For file uploads, forward the raw body as ArrayBuffer to preserve multipart boundary
+        const buffer = await request.arrayBuffer();
+        if (buffer.byteLength > MAX_BODY_SIZE) {
+          return NextResponse.json({ error: "Request body too large" }, { status: 413 });
+        }
+        fetchOptions.body = buffer;
+      } else {
+        const body = await request.text();
+        if (body.length > MAX_BODY_SIZE) {
+          return NextResponse.json({ error: "Request body too large" }, { status: 413 });
+        }
+        fetchOptions.body = body;
       }
-      fetchOptions.body = body;
     }
 
     // SSE streaming: detect by Accept header or URL suffix
