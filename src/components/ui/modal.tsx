@@ -37,7 +37,12 @@ export function Modal({ open, onClose, title, children, containerClassName = "",
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      onClick={(e) => {
+        if (e.target !== e.currentTarget) return;
+        const sel = window.getSelection();
+        if (sel && sel.toString().length > 0) return;
+        onClose();
+      }}
     >
       <div
         className={`${container} ${containerClassName}`}

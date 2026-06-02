@@ -101,6 +101,22 @@ interface LedgerItem {
   created_at: string;
 }
 
+interface Order {
+  id: number;
+  order_no: string;
+  user_id: number;
+  package_id: number;
+  amount_fen: number;
+  points: number;
+  status: string;
+  payment_remark?: string;
+  proof_image?: string;
+  submitted_at?: string;
+  reject_reason?: string;
+  package_name?: string;
+  created_at: string;
+}
+
 // AI模型列表
 const MODELS = [
   { 
@@ -294,6 +310,12 @@ export default function HomePage() {
   const [packages, setPackages] = useState<CreditPackage[]>([]);
   const [ledgerItems, setLedgerItems] = useState<LedgerItem[]>([]);
   const [billingLoading, setBillingLoading] = useState(false);
+  const [userOrders, setUserOrders] = useState<Order[]>([]);
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [payingOrder, setPayingOrder] = useState<Order | null>(null);
+  const [paymentRemark, setPaymentRemark] = useState("");
+  const [paymentFile, setPaymentFile] = useState<File | null>(null);
+  const [paymentSubmitting, setPaymentSubmitting] = useState(false);
 
   useEffect(() => {
     fetch("/api/custom-types")
@@ -527,9 +549,10 @@ export default function HomePage() {
     }
     setBillingLoading(true);
     try {
-      const [ledgerRes, packagesRes] = await Promise.all([
+      const [ledgerRes, packagesRes, ordersRes] = await Promise.all([
         fetch("/api/user/ledger"),
         fetch("/api/user/packages"),
+        fetch("/api/user/orders"),
       ]);
       if (ledgerRes.ok) {
         const ledgerData = await ledgerRes.json();
@@ -538,6 +561,10 @@ export default function HomePage() {
       if (packagesRes.ok) {
         const packagesData = await packagesRes.json();
         setPackages(packagesData.packages || []);
+      }
+      if (ordersRes.ok) {
+        const ordersData = await ordersRes.json();
+        setUserOrders(ordersData.orders || []);
       }
       setShowBillingModal(true);
     } finally {
@@ -559,12 +586,61 @@ export default function HomePage() {
         toast.error(String(data.detail || "创建订单失败"));
         return;
       }
-      toast.success(`订单 ${data.order?.order_no || ""} 已创建，等待支付接入`);
+      setPayingOrder(data.order as Order);
+      setPaymentRemark("");
+      setPaymentFile(null);
+      setShowBillingModal(false);
+      setShowPaymentModal(true);
       await loadBilling();
     } catch (error) {
       logger.error("Create order failed:", error);
       toast.error("创建订单失败，请重试");
     }
+  };
+
+  const submitPaymentProof = async () => {
+    if (!payingOrder || !csrfToken) return;
+    setPaymentSubmitting(true);
+    try {
+      const currentCsrfToken = await refreshCsrfToken();
+      const formData = new FormData();
+      formData.append("payment_remark", paymentRemark);
+      if (paymentFile) {
+        formData.append("proof_image", paymentFile);
+      }
+      const res = await fetch(`/api/user/orders/${payingOrder.order_no}/submit-proof`, {
+        method: "POST",
+        headers: { "X-CSRF-Token": currentCsrfToken },
+        body: formData,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast.error(String(data.detail || "提交失败"));
+        return;
+      }
+      setPayingOrder(data.order as Order);
+      toast.success("凭证已提交，等待管理员审核");
+      await loadBilling();
+    } catch (error) {
+      logger.error("Submit proof failed:", error);
+      toast.error("提交失败，请重试");
+    } finally {
+      setPaymentSubmitting(false);
+    }
+  };
+
+  const refreshPayingOrder = async () => {
+    if (!payingOrder) return;
+    try {
+      const res = await fetch("/api/user/orders");
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.orders) {
+        const updated = data.orders.find((o: Order) => o.order_no === payingOrder.order_no);
+        if (updated) {
+          setPayingOrder(updated);
+        }
+      }
+    } catch { /* ignore */ }
   };
 
   const readImageFile = (file: File | null) => {
@@ -1914,6 +1990,43 @@ export default function HomePage() {
               </div>
             ))}
           </div>
+          {/* 待处理订单 */}
+          {userOrders.filter(o => ["pending", "submitted", "rejected"].includes(o.status)).length > 0 && (
+            <div className="space-y-2">
+              <div className="text-white/60 text-sm font-medium">待处理订单</div>
+              {userOrders.filter(o => ["pending", "submitted", "rejected"].includes(o.status)).map((order) => {
+                const statusMap: Record<string, { label: string; color: string }> = {
+                  pending: { label: "待支付", color: "text-blue-300" },
+                  submitted: { label: "待审核", color: "text-yellow-300" },
+                  rejected: { label: "已驳回", color: "text-red-300" },
+                };
+                const st = statusMap[order.status] || { label: order.status, color: "text-white/60" };
+                return (
+                  <div key={order.order_no} className="flex items-center justify-between bg-white/5 border border-white/10 rounded-lg p-3">
+                    <div>
+                      <div className="text-white text-sm">{order.package_name || "充值"} · ¥{(order.amount_fen / 100).toFixed(2)}</div>
+                      <div className="text-white/40 text-xs font-mono">{order.order_no}</div>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span className={`text-xs font-medium ${st.color}`}>{st.label}</span>
+                      <button
+                        onClick={() => {
+                          setPayingOrder(order);
+                          setPaymentRemark(order.payment_remark || "");
+                          setPaymentFile(null);
+                          setShowBillingModal(false);
+                          setShowPaymentModal(true);
+                        }}
+                        className="px-3 py-1.5 bg-purple-600 hover:bg-purple-700 rounded text-white text-xs"
+                      >
+                        {order.status === "rejected" ? "重新提交" : "去支付"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
           <div className="bg-white/5 border border-white/10 rounded-lg overflow-hidden">
             <table className="w-full text-sm">
               <thead className="bg-white/5 text-white/60">
@@ -1942,6 +2055,148 @@ export default function HomePage() {
             </table>
           </div>
         </div>
+      </Modal>
+
+      {/* 支付弹窗 */}
+      <Modal
+        open={showPaymentModal}
+        title="扫码支付"
+        onClose={() => { setShowPaymentModal(false); setPayingOrder(null); }}
+        containerClassName="w-full max-w-lg"
+      >
+        {payingOrder && (
+          <div className="space-y-5">
+            {/* 订单信息 */}
+            <div className="flex items-center justify-between bg-white/5 border border-white/10 rounded-lg p-4">
+              <div>
+                <div className="text-white/60 text-sm">订单号</div>
+                <div className="text-white font-mono text-sm">{payingOrder.order_no}</div>
+              </div>
+              <div className="text-right">
+                <div className="text-white/60 text-sm">{payingOrder.package_name || "充值"}</div>
+                <div className="text-2xl font-bold text-green-400">¥{(payingOrder.amount_fen / 100).toFixed(2)}</div>
+              </div>
+            </div>
+
+            {/* 状态：已到账 */}
+            {payingOrder.status === "credited" && (
+              <div className="text-center py-6">
+                <div className="text-4xl mb-3">✅</div>
+                <div className="text-xl font-bold text-green-400">充值成功</div>
+                <div className="text-white/60 text-sm mt-1">{payingOrder.points} 积分已到账</div>
+                <button
+                  onClick={() => { setShowPaymentModal(false); setPayingOrder(null); }}
+                  className="mt-4 px-6 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg text-white text-sm"
+                >
+                  完成
+                </button>
+              </div>
+            )}
+
+            {/* 状态：已提交待审核 */}
+            {payingOrder.status === "submitted" && (
+              <div className="text-center py-4">
+                <div className="text-3xl mb-3">⏳</div>
+                <div className="text-lg font-semibold text-yellow-300">凭证已提交，等待管理员审核</div>
+                <div className="text-white/60 text-sm mt-2">请耐心等待，审核通过后积分将自动到账</div>
+                {payingOrder.payment_remark && (
+                  <div className="text-white/40 text-xs mt-2">备注: {payingOrder.payment_remark}</div>
+                )}
+                {payingOrder.proof_image && (
+                  <div className="mt-3">
+                    <img src={`/api/proof-image?path=${encodeURIComponent(payingOrder.proof_image)}`} alt="付款凭证" className="max-h-40 mx-auto rounded border border-white/20" />
+                  </div>
+                )}
+                <button
+                  onClick={refreshPayingOrder}
+                  className="mt-4 px-6 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-white text-sm"
+                >
+                  刷新状态
+                </button>
+              </div>
+            )}
+
+            {/* 状态：待支付/已驳回 → 显示二维码和提交表单 */}
+            {(payingOrder.status === "pending" || payingOrder.status === "rejected") && (
+              <>
+                {payingOrder.status === "rejected" && payingOrder.reject_reason && (
+                  <div className="bg-red-500/20 border border-red-500/30 rounded-lg p-3 text-red-300 text-sm">
+                    驳回原因: {payingOrder.reject_reason}
+                    <div className="text-white/40 text-xs mt-1">请修改后重新提交</div>
+                  </div>
+                )}
+
+                {/* 二维码 */}
+                <div className="flex flex-col items-center bg-white rounded-xl p-4">
+                  <img src="/wechatpay.png" alt="微信收款码" className="w-56 h-56 object-contain" />
+                  <div className="text-gray-500 text-xs mt-2">微信扫码支付</div>
+                </div>
+
+                {/* 付款提示 */}
+                <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3 text-yellow-200 text-sm space-y-1">
+                  <div>1. 请使用微信扫描上方二维码</div>
+                  <div>2. 支付金额: <span className="font-bold">¥{(payingOrder.amount_fen / 100).toFixed(2)}</span></div>
+                  <div>3. <span className="font-semibold">转账备注填写: {payingOrder.order_no}</span></div>
+                  <div>4. 支付完成后填写下方信息并提交</div>
+                </div>
+
+                {/* 备注输入 */}
+                <div>
+                  <label className="block text-white/60 text-sm mb-1">付款备注 <span className="text-white/40">(微信昵称/转账附言)</span></label>
+                  <input
+                    type="text"
+                    value={paymentRemark}
+                    onChange={(e) => setPaymentRemark(e.target.value)}
+                    placeholder="请输入微信昵称或转账附言"
+                    className="w-full px-3 py-2 bg-white/5 border border-white/20 rounded-lg text-white placeholder-white/30 text-sm focus:outline-none focus:border-purple-500"
+                  />
+                </div>
+
+                {/* 截图上传 */}
+                <div>
+                  <label className="block text-white/60 text-sm mb-1">付款截图 <span className="text-white/40">(可选)</span></label>
+                  <div className="border-2 border-dashed border-white/20 rounded-lg p-4 text-center hover:border-purple-500/50 transition-colors">
+                    {paymentFile ? (
+                      <div className="space-y-2">
+                        <img src={URL.createObjectURL(paymentFile)} alt="预览" className="max-h-32 mx-auto rounded" />
+                        <button onClick={() => setPaymentFile(null)} className="text-red-400 text-xs hover:underline">移除</button>
+                      </div>
+                    ) : (
+                      <label className="cursor-pointer block">
+                        <div className="text-white/40 text-sm">点击上传截图</div>
+                        <div className="text-white/30 text-xs mt-1">支持 JPG/PNG/WebP，最大 5MB</div>
+                        <input
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp"
+                          className="hidden"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            if (f) {
+                              if (f.size > 5 * 1024 * 1024) {
+                                toast.error("图片大小不能超过 5MB");
+                                return;
+                              }
+                              setPaymentFile(f);
+                            }
+                          }}
+                        />
+                      </label>
+                    )}
+                  </div>
+                </div>
+
+                {/* 提交按钮 */}
+                <button
+                  onClick={submitPaymentProof}
+                  disabled={paymentSubmitting || (!paymentRemark.trim() && !paymentFile)}
+                  className="w-full py-3 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-lg text-white font-medium"
+                >
+                  {paymentSubmitting ? "提交中..." : "我已付款，提交凭证"}
+                </button>
+              </>
+            )}
+          </div>
+        )}
       </Modal>
 
       {showSuccess && (

@@ -5,6 +5,14 @@ import { useAuth } from "../auth-context";
 import { toast } from "@/components/ui/toast";
 import { logger } from "@/lib/logger";
 
+function extractError(err: unknown, fallback = "操作失败"): string {
+  const obj = err as Record<string, unknown>;
+  if (typeof obj?.detail === "string") return obj.detail;
+  if (Array.isArray(obj?.detail))
+    return (obj.detail as Array<{ msg?: string }>).map((e) => e.msg ?? JSON.stringify(e)).join("; ");
+  return fallback;
+}
+
 interface UserItem {
   id: number;
   username: string;
@@ -88,7 +96,7 @@ export default function UsersPage() {
       });
       if (!r.ok) {
         const err: Record<string, unknown> = await r.json().catch(() => ({}));
-        toast.error(String(err.detail || "创建失败"));
+        toast.error(extractError(err, "创建失败"));
         return;
       }
       toast.success("用户创建成功");
@@ -130,7 +138,7 @@ export default function UsersPage() {
       const r = await fetchWithAuth(`/api/admin/users/${user.id}`, { method: "DELETE" });
       if (!r.ok) {
         const err: Record<string, unknown> = await r.json().catch(() => ({}));
-        toast.error(String(err.detail || "删除失败"));
+        toast.error(extractError(err, "删除失败"));
         return;
       }
       toast.success("用户已删除");
@@ -178,7 +186,7 @@ export default function UsersPage() {
       });
       if (!r.ok) {
         const err: Record<string, unknown> = await r.json().catch(() => ({}));
-        toast.error(String(err.detail || "修改失败"));
+        toast.error(extractError(err, "修改失败"));
         return;
       }
       toast.success("密码修改成功，请重新登录");
@@ -237,7 +245,7 @@ export default function UsersPage() {
             />
             <input
               type="password"
-              placeholder="密码 (至少12位，含大小写字母+数字+特殊字符)"
+              placeholder="密码 (任意长度)"
               value={createForm.password}
               onChange={(e) => setCreateForm({ ...createForm, password: e.target.value })}
               className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white text-sm"
@@ -413,7 +421,10 @@ export default function UsersPage() {
 
       {/* 用户详情弹窗 */}
       {detailUser && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setDetailUser(null)}>
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={(e) => {
+          if (e.target !== e.currentTarget) return;
+          setDetailUser(null);
+        }}>
           <div
             className="bg-gray-900 border border-gray-800 rounded-xl p-6 w-full max-w-md space-y-4"
             onClick={(e) => e.stopPropagation()}
@@ -495,7 +506,11 @@ export default function UsersPage() {
 
       {/* 编辑备注弹窗 */}
       {editNoteUser && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setEditNoteUser(null)}>
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={(e) => {
+          if (e.target !== e.currentTarget) return;
+          if (window.getSelection()?.toString()) return;
+          setEditNoteUser(null);
+        }}>
           <div
             className="bg-gray-900 border border-gray-800 rounded-xl p-6 w-full max-w-md space-y-4"
             onClick={(e) => e.stopPropagation()}
@@ -529,7 +544,11 @@ export default function UsersPage() {
 
       {/* 修改管理员密码弹窗 */}
       {showChangePwd && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setShowChangePwd(false)}>
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={(e) => {
+          if (e.target !== e.currentTarget) return;
+          if (window.getSelection()?.toString()) return;
+          setShowChangePwd(false);
+        }}>
           <div
             className="bg-gray-900 border border-gray-800 rounded-xl p-6 w-full max-w-md space-y-4"
             onClick={(e) => e.stopPropagation()}

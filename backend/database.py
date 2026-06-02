@@ -215,6 +215,18 @@ def init_db():
     key_cols = [r[1] for r in db.execute("PRAGMA table_info('api_keys')").fetchall()]
     if "balance_usd" not in key_cols:
         db.execute("ALTER TABLE api_keys ADD COLUMN balance_usd REAL DEFAULT 0")
+    # Migration: add payment proof fields to orders
+    order_cols = [r[1] for r in db.execute("PRAGMA table_info('orders')").fetchall()]
+    for col_name, col_def in [
+        ("payment_remark", "TEXT DEFAULT ''"),
+        ("proof_image", "TEXT DEFAULT ''"),
+        ("submitted_at", "TEXT"),
+        ("reviewed_at", "TEXT"),
+        ("reviewer_note", "TEXT DEFAULT ''"),
+        ("reject_reason", "TEXT DEFAULT ''"),
+    ]:
+        if col_name not in order_cols:
+            db.execute(f"ALTER TABLE orders ADD COLUMN {col_name} {col_def}")
     db.commit()
     db.executescript("""
         CREATE TABLE IF NOT EXISTS task_store (
@@ -947,14 +959,14 @@ def create_order(user_id: int, package_id: int, order_no: str) -> dict:
     order_id = int(cur.lastrowid)
     db.execute(
         """INSERT INTO payment_transactions (order_id, provider, status, raw_payload)
-           VALUES (?, 'mock', 'pending', ?)""",
-        (order_id, json.dumps({"source": "placeholder"}, ensure_ascii=False)),
+           VALUES (?, 'manual', 'pending', ?)""",
+        (order_id, json.dumps({"source": "manual_qr_payment"}, ensure_ascii=False)),
     )
     db.commit()
     return get_order_by_no(order_no) or {}
 
 
-def mark_order_paid(order_no: str, provider_trade_no: str = "") -> dict:
+def mark_order_paid(order_no: str, provider_trade_no: str = "", reviewer_note: str = "") -> dict:
     db = get_db()
     try:
         db.execute("BEGIN IMMEDIATE")
@@ -965,14 +977,14 @@ def mark_order_paid(order_no: str, provider_trade_no: str = "") -> dict:
         if order_dict["status"] == "credited":
             db.commit()
             return get_order_by_no(order_no) or order_dict
-        if order_dict["status"] not in ("pending", "paid"):
+        if order_dict["status"] not in ("pending", "submitted", "paid"):
             raise ValueError("order_not_creditable")
         db.execute(
             """UPDATE orders
                SET status = 'credited', paid_at = COALESCE(paid_at, datetime('now')),
-                   credited_at = datetime('now')
+                   credited_at = datetime('now'), reviewer_note = ?
                WHERE id = ?""",
-            (order_dict["id"],),
+            (reviewer_note, order_dict["id"]),
         )
         db.execute(
             """UPDATE payment_transactions
@@ -1001,6 +1013,65 @@ def mark_order_paid(order_no: str, provider_trade_no: str = "") -> dict:
     except Exception:
         db.rollback()
         raise
+
+
+def submit_order_proof(order_no: str, user_id: int, payment_remark: str = "", proof_image: str = "") -> dict:
+    db = get_db()
+    order = db.execute("SELECT * FROM orders WHERE order_no = ?", (order_no,)).fetchone()
+    if not order:
+        raise ValueError("order_not_found")
+    order_dict = dict(order)
+    if order_dict["user_id"] != user_id:
+        raise ValueError("order_not_found")
+    if order_dict["status"] not in ("pending", "submitted", "rejected"):
+        raise ValueError("order_not_submittable")
+    if proof_image:
+        db.execute(
+            """UPDATE orders
+               SET payment_remark = ?, proof_image = ?,
+                   submitted_at = datetime('now'), status = 'submitted',
+                   reject_reason = ''
+               WHERE order_no = ?""",
+            (payment_remark, proof_image, order_no),
+        )
+    else:
+        db.execute(
+            """UPDATE orders
+               SET payment_remark = ?,
+                   submitted_at = datetime('now'), status = 'submitted',
+                   reject_reason = ''
+               WHERE order_no = ?""",
+            (payment_remark, order_no),
+        )
+    db.commit()
+    return get_order_by_no(order_no) or {}
+
+
+def reject_order(order_no: str, reject_reason: str) -> dict:
+    db = get_db()
+    order = db.execute("SELECT * FROM orders WHERE order_no = ?", (order_no,)).fetchone()
+    if not order:
+        raise ValueError("order_not_found")
+    if dict(order)["status"] not in ("submitted", "pending"):
+        raise ValueError("order_not_rejectable")
+    db.execute(
+        """UPDATE orders
+           SET status = 'rejected', reject_reason = ?, reviewed_at = datetime('now')
+           WHERE order_no = ?""",
+        (reject_reason, order_no),
+    )
+    db.commit()
+    return get_order_by_no(order_no) or {}
+
+
+def get_order_proof(order_no: str) -> Optional[dict]:
+    db = get_db()
+    row = db.execute(
+        """SELECT order_no, payment_remark, proof_image, submitted_at, status, reject_reason
+           FROM orders WHERE order_no = ?""",
+        (order_no,),
+    ).fetchone()
+    return dict(row) if row else None
 
 
 def charge_generation(user_id: int, task_id: str, points: int, remark: str = "") -> dict:

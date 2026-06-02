@@ -329,18 +329,39 @@
   "orders": [
     {
       "id": 1,
-      "order_no": "MOCK...",
+      "order_no": "PAY...",
       "package_name": "体验包",
       "amount_fen": 990,
       "points": 100,
-      "status": "credited",
-      "created_at": "2026-05-30 10:00:00",
-      "paid_at": "2026-05-30 10:00:05",
-      "credited_at": "2026-05-30 10:00:05"
+      "status": "submitted",
+      "payment_remark": "微信昵称",
+      "proof_image": "/uploads/proofs/PAY..._123456.png",
+      "submitted_at": "2026-06-02 10:00:05",
+      "reject_reason": "",
+      "created_at": "2026-06-02 10:00:00"
     }
   ]
 }
 ```
+
+---
+
+#### `POST /user/orders/{order_no}/submit-proof` — 提交付款凭证
+
+**认证：** 需要前台用户登录 + CSRF
+
+**限流：** 10 次/分钟
+
+**请求：** `multipart/form-data`
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `payment_remark` | string | 否* | 付款备注（微信昵称/转账附言） |
+| `proof_image` | file | 否* | 付款截图（JPG/PNG/WebP，≤5MB） |
+
+*至少提供一项。
+
+**状态：** `pending`/`rejected` → `submitted`；已提交的可重新提交覆盖。
 
 ---
 
@@ -808,9 +829,27 @@ JSON 字段（`llm_request`, `llm_response`, `tasks_detail`）自动解析为对
 
 #### `GET /admin/orders` — 查询全部订单
 
-#### `POST /admin/orders/{order_no}/mark-paid` — 标记订单已支付
+返回所有订单，包含新字段：`payment_remark`、`proof_image`、`submitted_at`、`reject_reason`、`reviewer_note`。
 
-模拟支付回调，完成积分充值。
+#### `POST /admin/orders/{order_no}/mark-paid` — 确认入账
+
+管理员核验凭证后确认入账，积分充入用户钱包。
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `reviewer_note` | string | 否 | 审核备注 |
+
+支持从 `pending`、`submitted`、`paid` 状态转入 `credited`。
+
+#### `POST /admin/orders/{order_no}/reject` — 驳回订单
+
+驳回用户提交的付款凭证。
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `reject_reason` | string | 是 | 驳回原因（用户可见） |
+
+状态从 `submitted`/`pending` → `rejected`。用户可重新提交凭证。
 
 ---
 

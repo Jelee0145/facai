@@ -1,5 +1,79 @@
 ﻿# Agent Update Log
 
+## 2026-06-02 — 个人收款码 + 人工核验审批支付流程
+
+### 任务目标
+
+将 mock 支付替换为可实际使用的个人微信收款码 + 管理员手动审核流程。用户扫码付款后提交凭证（备注 + 截图），管理员在后台核验后确认入账或驳回。
+
+### 实现方案
+
+#### 1. 数据库层 (`backend/database.py`)
+
+- `orders` 表新增 6 字段：`payment_remark`、`proof_image`、`submitted_at`、`reviewed_at`、`reviewer_note`、`reject_reason`
+- 新增函数：`submit_order_proof()`、`reject_order()`、`get_order_proof()`
+- `mark_order_paid()` 支持 `submitted` 状态 + `reviewer_note` 参数
+- 支付渠道从 `mock` 改为 `manual`，订单号前缀从 `MOCK` 改为 `PAY`
+
+#### 2. 后端 API (`backend/main.py`)
+
+- `POST /user/orders/{order_no}/submit-proof` — 用户提交凭证（multipart/form-data，支持文件上传）
+- `POST /admin/orders/{order_no}/reject` — 管理员驳回订单
+- `POST /admin/orders/{order_no}/mark-paid` — 增强：支持 `submitted` 状态、`reviewer_note` 参数
+- 静态文件服务：`app.mount("/uploads", ...)` 提供付款截图访问
+- 文件上传限制：仅 JPG/PNG/WebP，≤5MB
+
+#### 3. 前端用户端 (`src/app/page.tsx`)
+
+- 新增支付弹窗：展示收款二维码 + 金额 + 订单号备注提示 + 备注输入 + 截图上传
+- 状态机：pending → submitted → credited / rejected（可重新提交）
+- Billing modal 新增"待处理订单"列表，支持继续支付和重新提交
+
+#### 4. 前端管理端 (`src/app/admin/billing/page.tsx`)
+
+- 完全重写：新增状态筛选（全部/待审核/待支付/已驳回/已入账）
+- 凭证信息列：付款备注 + 截图查看（点击放大）
+- 双按钮审核：确认入账 + 驳回（含驳回原因弹窗）
+- `submitted` 订单行高亮 + 待审核计数徽章
+
+#### 5. 基础设施
+
+- `public/wechatpay.png` — 收款码静态资源
+- `src/app/api/proof-image/route.ts` — 付款截图代理路由（前端 → 后端）
+- `src/lib/proxy.ts` — 修复 multipart/form-data 转发（ArrayBuffer）
+
+### 附带修复
+
+- 管理员创建用户跳过密码强校验（`min_length` 12→1，去掉 `validate_password_strength`）
+- 修复 3 处 `[object Object]` 错误展示（Pydantic 数组格式 detail 正确提取 msg）
+- Modal 组件及手动弹窗修复：选中输入框文字时不触发背景关闭
+
+### 变更文件
+
+| 文件 | 变更类型 | 说明 |
+|---|---|---|
+| `backend/database.py` | 修改 | 迁移 + 3 个新函数 + mark_order_paid 增强 |
+| `backend/main.py` | 修改 | 3 个新端点 + 静态文件 + 密码校验去除 |
+| `src/app/page.tsx` | 修改 | 支付弹窗 + 提交凭证 + 待处理订单列表 |
+| `src/app/admin/billing/page.tsx` | 重写 | 审核 UI：筛选、凭证查看、驳回 |
+| `src/app/admin/users/page.tsx` | 修改 | 错误展示修复 + 弹窗关闭修复 |
+| `src/components/ui/modal.tsx` | 修改 | 选中文字时不关闭 |
+| `src/lib/proxy.ts` | 修改 | multipart/form-data 转发修复 |
+| `src/app/api/proof-image/route.ts` | 新增 | 付款截图代理 |
+| `public/wechatpay.png` | 新增 | 收款码图片 |
+| `.gitignore` | 修改 | 忽略 backend/uploads/ |
+| `docs/02-数据库设计.md` | 修改 | orders 表 schema 更新 |
+| `docs/04-API参考手册.md` | 修改 | 新增 submit-proof / reject 端点 |
+
+### 检查项
+
+- [x] 数据库迁移测试：6 个新字段全部就位
+- [x] 端到端测试：创建订单 → 提交凭证 → 驳回 → 重新提交 → 入账 → 钱包到账
+- [x] TypeScript 编译：`tsc --noEmit` 通过
+- [x] 后端 API 端点注册：health / packages / orders / mark-paid / reject 均正常
+
+---
+
 ## 2026-06-01 — 延长图片生成轮询与 SSE 保活
 
 ### 任务目标
