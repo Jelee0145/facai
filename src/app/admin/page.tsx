@@ -8,6 +8,8 @@ import { logger } from "@/lib/logger";
 interface KeyHealth {
   id: number;
   name: string;
+  today_used: number;
+  total_used: number;
   fail_count: number;
   balance_usd: number;
   total_balance_usd: number;
@@ -123,9 +125,11 @@ export default function DashboardPage() {
         {(stats.keys_health?.keys || []).map((k: KeyHealth) => {
           const total = k.total_balance_usd || 0;
           const remaining = k.balance_usd || 0;
+          const spent = total - remaining;  // 已消耗金额
           const balancePct = total > 0 ? Math.min((remaining / total) * 100, 100) : 0;
           const maxImages = k.remaining_quota || 0;
-          const genPct = maxImages > 0 ? Math.min((stats.today_generations / maxImages) * 100, 100) : 0;
+          const usedImages = k.total_used || 0;  // 累计已生成张数
+          const imagePct = maxImages > 0 ? Math.min((usedImages / maxImages) * 100, 100) : 0;
           const isZeroBalance = remaining <= 0;
           const isLowBalance = !isZeroBalance && balancePct <= 20;
           const hasError = k.fail_count > 0;
@@ -139,7 +143,7 @@ export default function DashboardPage() {
           const balanceBarColor = isZeroBalance ? "bg-red-500"
             : isLowBalance ? "bg-amber-500" : "bg-purple-500";
 
-          const genBarColor = genPct > 80 ? "bg-red-500" : "bg-blue-500";
+          const imageBarColor = imagePct > 80 ? "bg-red-500" : "bg-blue-500";
 
           const formatLastUsed = (t: string | null): string => {
             if (!t) return "从未使用";
@@ -172,7 +176,7 @@ export default function DashboardPage() {
                   ${(k.balance_usd || 0).toFixed(2)}
                 </span>
                 <span className="text-xs text-gray-500">
-                  / ${total.toFixed(2)}  剩余 <span className="text-purple-400 font-semibold">{k.remaining_quota || 0}</span> 张
+                  / ${total.toFixed(2)}
                 </span>
               </div>
               <div className="w-full bg-gray-800 rounded-full h-1.5 mb-3">
@@ -182,10 +186,12 @@ export default function DashboardPage() {
                 />
               </div>
 
-              {/* 生成进度条 */}
+              {/* 张数信息 + 张数进度条 */}
               <div className="flex items-baseline gap-2 mb-1">
-                <span className="font-semibold text-blue-400">
-                  已生成 {stats.today_generations} 张
+                <span className={`font-semibold ${
+                  imagePct > 80 ? "text-red-400" : "text-blue-400"
+                }`}>
+                  已生成 {usedImages} 张
                 </span>
                 <span className="text-xs text-gray-500">
                   / 最多 <span className="text-purple-400 font-semibold">{maxImages}</span> 张
@@ -193,10 +199,11 @@ export default function DashboardPage() {
               </div>
               <div className="w-full bg-gray-800 rounded-full h-1.5 mb-3">
                 <div
-                  className={`h-1.5 rounded-full transition-all ${genBarColor}`}
-                  style={{ width: `${genPct}%` }}
+                  className={`h-1.5 rounded-full transition-all ${imageBarColor}`}
+                  style={{ width: `${imagePct}%` }}
                 />
               </div>
+
 
               {/* 底部：上次使用 + 设置按钮 */}
               <div className="flex items-center justify-between text-xs text-gray-500 mt-2 pt-2 border-t border-gray-800">

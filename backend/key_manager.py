@@ -64,6 +64,7 @@ class KeyManager:
                     "id": k["id"],
                     "name": k["name"],
                     "today_used": k["today_used"],
+                    "total_used": k["total_used"],
                     "daily_limit": k["daily_limit"],
                     "fail_count": k["fail_count"],
                     "usage_pct": round(k["today_used"] / k["daily_limit"] * 100, 1) if k["daily_limit"] else 0,
