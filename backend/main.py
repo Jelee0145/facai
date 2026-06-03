@@ -201,6 +201,11 @@ def _preview_images(urls: list[str]) -> str:
     return json.dumps(visible[:3], ensure_ascii=False)
 
 
+def _history_description_snapshot(req: GenerateRequest) -> str:
+    """Always use the user's original description, never product_type or LLM output."""
+    return sanitize_input(req.description, 500)
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     """全局异常：过滤敏感路径信息"""
@@ -1246,7 +1251,7 @@ async def generate_images(
             add_history(task_id=task_id, api_key_id=None, user_id=user_id, product_type=sanitize_input(req.product_type, 50),
                         country=sanitize_input(req.country, 20), model=model_code, status="completed",
                         elapsed_seconds=round(time.time() - start, 1), charge_points=charge_points,
-                        description_snapshot=sanitize_input(req.product_type, 200),
+                        description_snapshot=_history_description_snapshot(req),
                         preview_images_json=_preview_images([url]))
             return {"success": True, "data": {"comparisonImage": url}}
 
@@ -1257,7 +1262,7 @@ async def generate_images(
             add_history(task_id=task_id, api_key_id=None, user_id=user_id, product_type=sanitize_input(req.product_type, 50),
                         country=sanitize_input(req.country, 20), model=model_code, status="completed",
                         elapsed_seconds=round(time.time() - start, 1), charge_points=charge_points,
-                        description_snapshot=sanitize_input(req.product_type, 200),
+                        description_snapshot=_history_description_snapshot(req),
                         preview_images_json=_preview_images([url]))
             return {"success": True, "data": {"detailImage": url}}
 
@@ -1287,7 +1292,7 @@ async def generate_images(
                         elapsed_seconds=round(time.time() - start, 1),
                         llm_request="", llm_response=llm_response_data,
                         tasks_detail=tasks_detail, charge_points=charge_points,
-                        description_snapshot=sanitize_input(gen_result.get("description", req.product_type), 500),
+                        description_snapshot=_history_description_snapshot(req),
                         preview_images_json=_preview_images([url]),
                         titles_json=json.dumps(gen_result.get("titles", []), ensure_ascii=False),
                         tags_json=json.dumps(tags, ensure_ascii=False),
@@ -1338,7 +1343,7 @@ async def generate_images(
                     success_count=success_count, status="completed", elapsed_seconds=round(elapsed, 1),
                     llm_request="", llm_response=llm_response_data,
                     tasks_detail=tasks_detail, charge_points=charge_points,
-                    description_snapshot=sanitize_input(gen_result.get("description", req.product_type), 500),
+                    description_snapshot=_history_description_snapshot(req),
                     preview_images_json=_preview_images(model_images),
                     titles_json=json.dumps(gen_result.get("titles", []), ensure_ascii=False),
                     tags_json=json.dumps(tags, ensure_ascii=False),
@@ -1410,7 +1415,7 @@ async def generate_images(
             _try_refund_generation(charge_state, user_id, task_id, charge_points, "生成失败自动退回")
         add_history(task_id=task_id, api_key_id=None, user_id=user_id, product_type=sanitize_input(req.product_type, 50),
                     country=sanitize_input(req.country, 20), model="", status="failed", error_msg=str(e.detail)[:500],
-                    description_snapshot=sanitize_input(req.product_type, 500))
+                    description_snapshot=_history_description_snapshot(req))
         raise
     except Exception as e:
         print(f"[ERROR] Sync task {task_id} failed: {e}")
@@ -1418,7 +1423,7 @@ async def generate_images(
             _try_refund_generation(charge_state, user_id, task_id, charge_points, "生成失败自动退回")
         add_history(task_id=task_id, api_key_id=None, user_id=user_id, product_type=sanitize_input(req.product_type, 50),
                     country=sanitize_input(req.country, 20), model="", status="failed", error_msg=str(e)[:500],
-                    description_snapshot=sanitize_input(req.product_type, 500))
+                    description_snapshot=_history_description_snapshot(req))
         return JSONResponse(status_code=500, content={"success": False, "error": "Internal server error"})
 
 
@@ -1639,7 +1644,7 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
             llm_response=llm_response_data,
             tasks_detail=tasks_detail_json,
             charge_points=charge_points,
-            description_snapshot=sanitize_input(gen_result.get("description", req.product_type), 500),
+            description_snapshot=_history_description_snapshot(req),
             preview_images_json=_preview_images(model_images),
             titles_json=json.dumps(gen_result.get("titles", []), ensure_ascii=False),
             tags_json=json.dumps(tags, ensure_ascii=False),
@@ -1686,7 +1691,7 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
             model=sanitize_input(req.model, 20),
             status="failed",
             error_msg=str(e)[:500],
-            description_snapshot=sanitize_input(req.product_type, 500),
+            description_snapshot=_history_description_snapshot(req),
         )
 
 

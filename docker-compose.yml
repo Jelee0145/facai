@@ -29,7 +29,7 @@ services:
       dockerfile: Dockerfile.frontend
     ports:
       - "4524:4524"
-    env_file: ./.env
+    env_file: ./backend/.env
     environment:
       - BACKEND_URL=http://backend:8001
     depends_on:

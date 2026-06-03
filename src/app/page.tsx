@@ -1895,7 +1895,7 @@ export default function HomePage() {
             {detailItem.description_snapshot && (
               <div>
                 <h4 className="text-white font-medium mb-2 flex items-center gap-2">
-                  <span>📝</span> 描述
+                  <span>📝</span> 用户补充描述
                 </h4>
                 <p className="text-white/70 text-sm bg-white/5 rounded-lg p-3">{detailItem.description_snapshot}</p>
               </div>

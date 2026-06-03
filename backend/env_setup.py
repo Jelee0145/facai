@@ -43,7 +43,9 @@ def auto_fill_env(env_path=None):
     if modified:
         with open(env_path, "w", encoding="utf-8") as f:
             f.writelines(lines)
-        _sync_root_env(env_path)
+    # Always sync root .env — even when backend/.env was not modified this run,
+    # the root .env may have a stale or mismatched token from a prior run.
+    _sync_root_env(env_path)
 
 
 def _sync_root_env(backend_env_path: str):
@@ -70,7 +72,7 @@ def _sync_root_env(backend_env_path: str):
         print("[INIT] Created root .env with API_AUTH_TOKEN")
         return
 
-    # Update existing root .env (only if value is empty or missing)
+    # Update existing root .env — overwrite if token differs (backend/.env is source of truth)
     with open(root_env_path, "r", encoding="utf-8") as f:
         lines = f.readlines()
 
@@ -79,9 +81,9 @@ def _sync_root_env(backend_env_path: str):
         stripped = line.strip()
         if stripped.startswith("API_AUTH_TOKEN="):
             old_val = stripped[len("API_AUTH_TOKEN="):]
-            if not old_val:
+            if old_val != token:
                 lines[i] = f"API_AUTH_TOKEN={token}\n"
-                print("[INIT] Synced API_AUTH_TOKEN to root .env")
+                print("[INIT] Synced API_AUTH_TOKEN to root .env (overwrote stale value)")
             found = True
             break
 

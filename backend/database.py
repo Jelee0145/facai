@@ -234,7 +234,6 @@ def init_db():
     ct_cols = [r[1] for r in db.execute("PRAGMA table_info('custom_product_types')").fetchall()]
     if "user_id" not in ct_cols:
         db.execute("ALTER TABLE custom_product_types ADD COLUMN user_id INTEGER")
-    db.execute("DELETE FROM custom_product_types WHERE user_id IS NULL")
     db.commit()
     db.executescript("""
         CREATE TABLE IF NOT EXISTS task_store (

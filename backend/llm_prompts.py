@@ -2,6 +2,8 @@
 LLM 提示词模板 — 3 个独立请求：模特图、商品图、爆款内容
 """
 
+from prompts_v2 import sanitize_prompt_input
+
 # ============================================================
 # 1. 模特图 Prompt 生成
 # ============================================================
@@ -69,6 +71,8 @@ def build_model_user_prompt(
     user_description: str = "",
 ) -> str:
     """构建模特图请求的用户消息"""
+    product_type = sanitize_prompt_input(product_type, "product_type")
+    user_description = sanitize_prompt_input(user_description, "description") if user_description else ""
     desc_line = f"\n用户补充描述：{user_description}" if user_description else ""
     return f"""请参考上方的商品图片，生成 {count} 条模特展示图的生图提示词。
 
@@ -92,6 +96,8 @@ def build_product_user_prompt(
     user_description: str = "",
 ) -> str:
     """构建商品图请求的用户消息"""
+    product_type = sanitize_prompt_input(product_type, "product_type")
+    user_description = sanitize_prompt_input(user_description, "description") if user_description else ""
     desc_line = f"\n用户补充描述：{user_description}" if user_description else ""
     return f"""请参考上方的商品图片，生成 {count} 条商品图的生图提示词。
 
@@ -112,6 +118,8 @@ def build_metadata_user_prompt(
     user_description: str = "",
 ) -> str:
     """构建爆款内容请求的用户消息"""
+    product_type = sanitize_prompt_input(product_type, "product_type")
+    user_description = sanitize_prompt_input(user_description, "description") if user_description else ""
     desc_line = f"\n用户补充描述：{user_description}" if user_description else ""
     return f"""商品类型：{product_type}
 目标市场：{country_name}（{platform}）{desc_line}

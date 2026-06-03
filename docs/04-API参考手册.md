@@ -427,7 +427,7 @@
       "id": 1,
       "task_id": "uuid-string",
       "product_type": "连衣裙",
-      "description_snapshot": "高品质连衣裙...",
+      "description_snapshot": "用户填写的补充描述（非 AI 生成文案）",
       "preview_images": ["https://..."],
       "charge_points": 10,
       "status": "completed",
@@ -488,6 +488,11 @@
 - 格式：JPEG / PNG / WebP / AVIF
 - 最大大小：5MB（base64 解码后）
 - 支持 HTTP URL 和 `data:image/*;base64` 格式
+
+**输入校验：**
+- `product_type` 和 `description` 在传入 LLM 前会经过安全消毒（`sanitize_prompt_input`）
+- 若内容命中注入黑名单或包含控制字符，接口返回 `400`，错误体含 `field` 和 `detail` 字段
+- 校验在 `llm_prompts.py` 的 prompt 构建层统一执行，不在 `main.py` 重复校验
 
 **响应示例（comparison 模式）：**
 ```json
