@@ -774,6 +774,8 @@ eventSource.onmessage = (event) => {
 }
 ```
 
+**注意：** 当更新 `balance_usd` 时，系统会自动重置 `today_used=0`、`total_used=0`
+
 #### `DELETE /admin/api-keys/{key_id}` — 删除 API Key
 
 ---

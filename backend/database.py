@@ -377,9 +377,10 @@ def update_key(key_id: int, **kwargs) -> bool:
         return False
     if updates.get("is_active") == 1:
         updates["fail_count"] = 0
-    # Reset daily usage when balance is manually updated
+    # Reset usage when balance is manually updated
     if "balance_usd" in updates:
         updates["today_used"] = 0
+        updates["total_used"] = 0
         updates["total_balance_usd"] = updates["balance_usd"]
     updates["updated_at"] = datetime.now().isoformat()
     set_clause = ", ".join(f"{k} = ?" for k in updates)
@@ -428,6 +429,32 @@ def mark_key_failed(key_id: int):
         row = db.execute("SELECT fail_count, is_active FROM api_keys WHERE id = ?", (key_id,)).fetchone()
         if row and row["is_active"] == 0:
             print(f"[KEY] API Key {key_id} disabled after {row['fail_count']} consecutive failures")
+
+
+def deduct_key_balance(key_id: int, image_count: int, cost_per_image: float) -> dict:
+    """生成成功后按实际张数扣减 Key 余额（clamp to 0，不出现负值）"""
+    db = get_db()
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT balance_usd FROM api_keys WHERE id = ?", (key_id,)).fetchone()
+        if not row:
+            db.commit()
+            return {"key_id": key_id, "deducted": 0, "balance_after": 0, "clamped": False, "error": "key_not_found"}
+        current = float(row["balance_usd"] or 0)
+        raw = image_count * cost_per_image
+        if current <= 0:
+            db.commit()
+            return {"key_id": key_id, "deducted": 0, "balance_after": 0, "clamped": True}
+        if raw >= current:
+            actual, new_bal, clamped = current, 0.0, True
+        else:
+            actual, new_bal, clamped = raw, current - raw, False
+        db.execute("UPDATE api_keys SET balance_usd = ?, updated_at = datetime('now') WHERE id = ?", (new_bal, key_id))
+        db.commit()
+        return {"key_id": key_id, "deducted": actual, "balance_after": new_bal, "clamped": clamped}
+    except Exception:
+        db.rollback()
+        raise
 
 
 def reset_daily_usage():
