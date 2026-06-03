@@ -78,7 +78,7 @@ from database import (
     submit_order_proof, reject_order, get_order_proof,
     reset_daily_usage,
 )
-from llm_provider import analyze as llm_analyze, build_llm_messages
+from llm_provider import generate_model_prompts, generate_product_prompts, generate_metadata
 
 import logging
 
@@ -366,12 +366,15 @@ class GenerateRequest(BaseModel):
         pattern=r"^(japan|korea|usa|thailand|vietnam|malaysia|philippines|indonesia|china)$",
     )
     model: str = "general"
+    model_name: str = Field(default="通用模型", max_length=50)
+    model_desc: str = Field(default="综合效果好", max_length=200)
     generate_type: str = Field(default="all", pattern=r"^(all|comparison|detail|test)$")
     style_index: int = Field(default=0, ge=0, le=10)
     prompt_size: str = Field(default="auto", pattern=r"^(auto|1:1|4:3|3:4|16:9|9:16)$")
     prompt_resolution: str = Field(default="1k", pattern=r"^(1k|2k|4k)$")
     model_image_count: int = Field(default=4, ge=0, le=9)
     charge_points: Optional[int] = Field(default=None, ge=1, le=10)
+    description: str = Field(default="", max_length=500)
 
 
 class LoginRequest(BaseModel):
@@ -1192,38 +1195,48 @@ async def generate_images(
         print(f"   [CATEGORY] {category['parent']} | [MODEL] {model_profile['name']} ({model_profile['tagline']})")
         print(f"   [MARKET] {country_config['name']} ({country_config['platform']}) | [SHOT] {category['shot_type']}")
 
-        # LLM 智能分析（失败时静默降级）
-        llm_config = None
-        llm_request_data = ""
+        # LLM 智能生成 prompt（3 次并发请求，失败时静默降级）
+        model_prompts = None
+        product_prompts = None
+        metadata = None
         llm_response_data = ""
         if get_config("llm_api_key"):
             try:
-                llm_messages = build_llm_messages(
+                common_args = dict(
                     image_url=hosted_image_url if hosted_image_url else None,
                     product_type=req.product_type,
                     country_name=country_config["name"],
                     platform=country_config["platform"],
-                    model_name=model_profile["name"],
-                    model_tagline=model_profile["tagline"],
-                    category_name=category["name"],
-                    shot_type=category.get("shot_type", "product"),
+                    model_name=req.model_name,
+                    model_tagline=req.model_desc,
+                    user_description=req.description,
                 )
-                llm_request_data = json.dumps(llm_messages, ensure_ascii=False)
-                llm_config = await llm_analyze(
-                    image_url=hosted_image_url if hosted_image_url else None,
-                    product_type=req.product_type,
-                    country_name=country_config["name"],
-                    platform=country_config["platform"],
-                    model_name=model_profile["name"],
-                    model_tagline=model_profile["tagline"],
-                    category_name=category["name"],
-                    shot_type=category.get("shot_type", "product"),
+                # 并发 3 次 LLM 请求
+                results = await asyncio.gather(
+                    generate_model_prompts(count=req.model_image_count, **common_args),
+                    generate_product_prompts(count=9 - req.model_image_count, **common_args),
+                    generate_metadata(
+                        product_type=req.product_type,
+                        country_name=country_config["name"],
+                        platform=country_config["platform"],
+                        user_description=req.description,
+                    ),
+                    return_exceptions=True,
                 )
-                if llm_config:
-                    llm_response_data = json.dumps(llm_config, ensure_ascii=False)
-                    print(f"  [LLM] Analysis successful")
+                if isinstance(results[0], list):
+                    model_prompts = results[0]
+                if isinstance(results[1], list):
+                    product_prompts = results[1]
+                if isinstance(results[2], dict):
+                    metadata = results[2]
+                llm_response_data = json.dumps({
+                    "model_prompts": model_prompts,
+                    "product_prompts": product_prompts,
+                    "metadata": metadata,
+                }, ensure_ascii=False)
+                print(f"  [LLM] Prompts generated: {len(model_prompts or [])} model + {len(product_prompts or [])} product + metadata={'yes' if metadata else 'no'}")
             except Exception as e:
-                print(f"  [WARN] LLM analysis failed (downgrading to template): {e}")
+                print(f"  [WARN] LLM prompt generation failed (downgrading): {e}")
 
         # 2. 单图生成模式
         if req.generate_type == "comparison":
@@ -1256,7 +1269,8 @@ async def generate_images(
                 req.prompt_size, req.prompt_resolution,
                 category=category, country_config=country_config,
                 model_code=model_code, model_profile=model_profile,
-                llm_config=llm_config,
+                model_prompts=model_prompts, product_prompts=product_prompts,
+                metadata=metadata,
                 model_image_count=req.model_image_count,
             )
             url = await apimart_generate(
@@ -1271,7 +1285,7 @@ async def generate_images(
             add_history(task_id=task_id, api_key_id=None, user_id=user_id, product_type=sanitize_input(req.product_type, 50),
                         country=sanitize_input(req.country, 20), model=model_code, status="completed",
                         elapsed_seconds=round(time.time() - start, 1),
-                        llm_request=llm_request_data, llm_response=llm_response_data,
+                        llm_request="", llm_response=llm_response_data,
                         tasks_detail=tasks_detail, charge_points=charge_points,
                         description_snapshot=sanitize_input(gen_result.get("description", req.product_type), 500),
                         preview_images_json=_preview_images([url]),
@@ -1301,7 +1315,8 @@ async def generate_images(
             req.prompt_size, req.prompt_resolution,
             category=category, country_config=country_config,
             model_code=model_code, model_profile=model_profile,
-            llm_config=llm_config,
+            model_prompts=model_prompts, product_prompts=product_prompts,
+            metadata=metadata,
             model_image_count=req.model_image_count,
         )
 
@@ -1321,7 +1336,7 @@ async def generate_images(
         add_history(task_id=task_id, api_key_id=None, user_id=user_id, product_type=sanitize_input(req.product_type, 50),
                     country=sanitize_input(req.country, 20), model=model_code, total_images=TOTAL_GENERATION_IMAGES,
                     success_count=success_count, status="completed", elapsed_seconds=round(elapsed, 1),
-                    llm_request=llm_request_data, llm_response=llm_response_data,
+                    llm_request="", llm_response=llm_response_data,
                     tasks_detail=tasks_detail, charge_points=charge_points,
                     description_snapshot=sanitize_input(gen_result.get("description", req.product_type), 500),
                     preview_images_json=_preview_images(model_images),
@@ -1447,38 +1462,47 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
         country_config = COUNTRY_CONFIG.get(req.country, COUNTRY_CONFIG["usa"])
         model_profile = get_model_profile(model_code)
 
-        # LLM 智能分析（失败时静默降级）
-        llm_config = None
-        llm_request_data = ""
+        # LLM 智能生成 prompt（3 次并发请求，失败时静默降级）
+        model_prompts = None
+        product_prompts = None
+        metadata = None
         llm_response_data = ""
         if get_config("llm_api_key"):
             try:
-                llm_messages = build_llm_messages(
+                common_args = dict(
                     image_url=hosted_image_url if hosted_image_url else None,
                     product_type=req.product_type,
                     country_name=country_config["name"],
                     platform=country_config["platform"],
-                    model_name=model_profile["name"],
-                    model_tagline=model_profile["tagline"],
-                    category_name=category["name"],
-                    shot_type=category.get("shot_type", "product"),
+                    model_name=req.model_name,
+                    model_tagline=req.model_desc,
+                    user_description=req.description,
                 )
-                llm_request_data = json.dumps(llm_messages, ensure_ascii=False)
-                llm_config = await llm_analyze(
-                    image_url=hosted_image_url if hosted_image_url else None,
-                    product_type=req.product_type,
-                    country_name=country_config["name"],
-                    platform=country_config["platform"],
-                    model_name=model_profile["name"],
-                    model_tagline=model_profile["tagline"],
-                    category_name=category["name"],
-                    shot_type=category.get("shot_type", "product"),
+                results = await asyncio.gather(
+                    generate_model_prompts(count=req.model_image_count, **common_args),
+                    generate_product_prompts(count=9 - req.model_image_count, **common_args),
+                    generate_metadata(
+                        product_type=req.product_type,
+                        country_name=country_config["name"],
+                        platform=country_config["platform"],
+                        user_description=req.description,
+                    ),
+                    return_exceptions=True,
                 )
-                if llm_config:
-                    llm_response_data = json.dumps(llm_config, ensure_ascii=False)
-                    print(f"  [LLM] Analysis successful: {len(llm_config.get('scene_config', {}).get('scenes', []))} scenes, {len(llm_config.get('metadata', {}).get('titles', []))} titles")
+                if isinstance(results[0], list):
+                    model_prompts = results[0]
+                if isinstance(results[1], list):
+                    product_prompts = results[1]
+                if isinstance(results[2], dict):
+                    metadata = results[2]
+                llm_response_data = json.dumps({
+                    "model_prompts": model_prompts,
+                    "product_prompts": product_prompts,
+                    "metadata": metadata,
+                }, ensure_ascii=False)
+                print(f"  [LLM] Prompts generated: {len(model_prompts or [])} model + {len(product_prompts or [])} product + metadata={'yes' if metadata else 'no'}")
             except Exception as e:
-                print(f"  [WARN] LLM analysis failed (downgrading to template): {e}")
+                print(f"  [WARN] LLM prompt generation failed (downgrading): {e}")
 
         # 生成任务
         gen_result = generate_all_tasks(
@@ -1489,7 +1513,9 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
             country_config=country_config,
             model_code=model_code,
             model_profile=model_profile,
-            llm_config=llm_config,
+            model_prompts=model_prompts,
+            product_prompts=product_prompts,
+            metadata=metadata,
             model_image_count=req.model_image_count,
         )
 
@@ -1609,7 +1635,7 @@ async def _run_generation_background(task_id: str, req: GenerateRequest, user_id
             success_count=progress["completed"],
             status="completed",
             elapsed_seconds=round(time.time() - progress["start_time"], 1),
-            llm_request=llm_request_data,
+            llm_request="",
             llm_response=llm_response_data,
             tasks_detail=tasks_detail_json,
             charge_points=charge_points,

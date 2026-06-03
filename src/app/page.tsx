@@ -256,9 +256,14 @@ export default function HomePage() {
   const [newCustomTypeCategory, setNewCustomTypeCategory] = useState<string>("");
   const [editingCustomTypes, setEditingCustomTypes] = useState<boolean>(false);
 
+  // 获取当前选中风格的名称和描述
+  const getModelInfo = () => {
+    const m = MODELS.find((m) => m.code === selectedModel);
+    return { model_name: m?.name || "通用模型", model_desc: m?.desc || "综合效果好" };
+  };
+
   // 获取实际发送给后端的 product_type
   const getEffectiveProductType = () => {
-    if (description) return description;
     const customProduct = customTypes.find((p) => p.code === selectedProduct);
     return customProduct ? customProduct.label : selectedProduct;
   };
@@ -746,7 +751,9 @@ export default function HomePage() {
           product_type: getEffectiveProductType(),
           country: selectedCountry,
           model: selectedModel,
+          ...getModelInfo(),
           model_image_count: modelImageCount,
+          description,
         }),
       });
 
@@ -800,8 +807,10 @@ export default function HomePage() {
           product_type: getEffectiveProductType(),
           country: selectedCountry,
           model: selectedModel,
+          ...getModelInfo(),
           model_image_count: modelImageCount,
           generate_type: "test",
+          description,
         }),
       });
 
@@ -857,10 +866,12 @@ export default function HomePage() {
           product_type: getEffectiveProductType(),
           country: selectedCountry,
           model: selectedModel,
+          ...getModelInfo(),
           model_image_count: generatedModelImageCount,
           generate_type: "test",
           style_index: styleIndex,
           charge_points: 2,
+          description,
         }),
       });
 
@@ -1397,6 +1408,11 @@ export default function HomePage() {
                   </span>
                   <span>{progressPercent}%</span>
                 </div>
+                {elapsedSeconds > 60 && (
+                  <p className="text-center text-sm mt-1" style={{ color: "rgba(255,255,255,0.4)" }}>
+                    AI生成多张图片所需时间可能较长，请您耐心等待
+                  </p>
+                )}
               </div>
             ) : (
               `🚀 一键生成：9张主图 + 2张辅助图`

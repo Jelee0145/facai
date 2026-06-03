@@ -1,5 +1,5 @@
 """
-LLM 智能配置器 — 阿里云百炼 API 调用
+LLM 调用层 — 3 个独立函数：模特图 prompt、商品图 prompt、爆款内容
 """
 
 import json
@@ -7,16 +7,19 @@ import logging
 import re
 import httpx
 from database import get_config
-from llm_schema import LLMOutput
+from llm_schema import LLMPromptsOutput, LLMMetadata
 from llm_prompts import (
-    SYSTEM_PROMPT_VISION,
-    SYSTEM_PROMPT_TEXT,
-    build_user_prompt,
-    build_user_prompt_with_image,
+    SYSTEM_PROMPT_MODEL,
+    SYSTEM_PROMPT_PRODUCT,
+    SYSTEM_PROMPT_METADATA,
+    build_model_user_prompt,
+    build_product_user_prompt,
+    build_metadata_user_prompt,
 )
+from prompts_v2 import _normalize_tags
 
 DASHSCOPE_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-LLM_TIMEOUT = 30
+LLM_TIMEOUT = 60
 
 logger = logging.getLogger("ecommerce-gen.llm")
 
@@ -30,53 +33,11 @@ def get_llm_config() -> tuple[str, str]:
     return api_key, model
 
 
-def build_llm_messages(
-    image_url: str | None,
-    product_type: str,
-    country_name: str,
-    platform: str,
-    model_name: str,
-    model_tagline: str,
-    category_name: str,
-    shot_type: str,
-) -> list[dict]:
-    """构建 LLM 请求消息（不发起 API 调用），用于日志记录"""
-    if image_url:
-        system = SYSTEM_PROMPT_VISION
-        user_text = build_user_prompt_with_image(
-            product_type, country_name, platform,
-            model_name, model_tagline, category_name, shot_type,
-        )
-        messages = [
-            {"role": "system", "content": system},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": user_text},
-                ],
-            },
-        ]
-    else:
-        system = SYSTEM_PROMPT_TEXT
-        user_text = build_user_prompt(
-            product_type, country_name, platform,
-            model_name, model_tagline, category_name, shot_type,
-        )
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_text},
-        ]
-    return messages
-
-
-def _parse_llm_json(content: str) -> dict | None:
-    """Parse LLM JSON response, stripping markdown code fences if present.
-    Returns schema-validated dict or None on any failure."""
+def _parse_llm_json(content: str, schema_cls=None) -> dict | None:
+    """Parse LLM JSON response, stripping markdown code fences if present."""
     if not content or not content.strip():
         return None
     raw = content.strip()
-    # Strip code fence wrapper if present
     fence = _CODE_FENCE_RE.search(raw)
     if fence:
         raw = fence.group(1).strip()
@@ -86,38 +47,22 @@ def _parse_llm_json(content: str) -> dict | None:
         return None
     if not isinstance(parsed, dict):
         return None
-    # Validate against LLMOutput schema — fail-closed, no raw-dict fallback
-    try:
-        validated = LLMOutput.model_validate(parsed)
-        return validated.model_dump()
-    except Exception as e:
-        logger.warning(f"[LLM] Schema validation failed: {e}")
-        return None
+    if schema_cls:
+        try:
+            validated = schema_cls.model_validate(parsed)
+            return validated.model_dump()
+        except Exception as e:
+            logger.warning(f"[LLM] Schema validation failed: {e}")
+            return None
+    return parsed
 
 
-async def analyze(
-    image_url: str | None,
-    product_type: str,
-    country_name: str,
-    platform: str,
-    model_name: str,
-    model_tagline: str,
-    category_name: str,
-    shot_type: str,
-) -> dict | None:
-    """
-    调用百炼 qwen-vl-flash 分析商品并生成配置
-    返回结构化 dict，失败时返回 None（触发降级）
-    """
-    api_key, llm_model = get_llm_config()
-    if not api_key:
-        return None
-
-    messages = build_llm_messages(
-        image_url, product_type, country_name, platform,
-        model_name, model_tagline, category_name, shot_type,
-    )
-
+async def _call_llm(
+    api_key: str,
+    model: str,
+    messages: list[dict],
+) -> str | None:
+    """调用 LLM API，返回原始 content 字符串"""
     try:
         async with httpx.AsyncClient(timeout=LLM_TIMEOUT) as client:
             resp = await client.post(
@@ -127,30 +72,133 @@ async def analyze(
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": llm_model,
+                    "model": model,
                     "messages": messages,
                     "response_format": {"type": "json_object"},
                 },
             )
-
         if resp.status_code != 200:
-            print(f"[LLM] API 返回 {resp.status_code}: {resp.text[:200]}")
+            logger.warning(f"[LLM] API 返回 {resp.status_code}: {resp.text[:200]}")
             return None
-
         data = resp.json()
-        content = data["choices"][0]["message"]["content"]
-        result = _parse_llm_json(content)
-        return result
-
-    except httpx.TimeoutException:
-        print("[LLM] 请求超时")
-        return None
-    except httpx.ConnectError:
-        print("[LLM] 连接失败")
+        return data["choices"][0]["message"]["content"]
+    except (httpx.TimeoutException, httpx.ConnectError) as e:
+        logger.warning(f"[LLM] 网络错误: {e}")
         return None
     except (json.JSONDecodeError, KeyError, IndexError) as e:
-        print(f"[LLM] 解析失败: {e}")
+        logger.warning(f"[LLM] 解析错误: {e}")
         return None
     except Exception as e:
-        print(f"[LLM] 未知错误: {e}")
+        logger.warning(f"[LLM] 未知错误: {e}")
         return None
+
+
+async def generate_model_prompts(
+    image_url: str | None,
+    product_type: str,
+    country_name: str,
+    platform: str,
+    model_name: str,
+    model_tagline: str,
+    count: int,
+    user_description: str = "",
+) -> list[str] | None:
+    """生成模特图 prompt 列表，失败返回 None"""
+    api_key, llm_model = get_llm_config()
+    if not api_key:
+        return None
+
+    user_text = build_model_user_prompt(
+        product_type, country_name, platform,
+        model_name, model_tagline, count, user_description,
+    )
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT_MODEL},
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "text", "text": user_text},
+            ],
+        },
+    ]
+
+    content = await _call_llm(api_key, llm_model, messages)
+    if not content:
+        return None
+
+    result = _parse_llm_json(content, LLMPromptsOutput)
+    if result and result.get("prompts"):
+        return result["prompts"]
+    return None
+
+
+async def generate_product_prompts(
+    image_url: str | None,
+    product_type: str,
+    country_name: str,
+    platform: str,
+    model_name: str,
+    model_tagline: str,
+    count: int,
+    user_description: str = "",
+) -> list[str] | None:
+    """生成商品图 prompt 列表，失败返回 None"""
+    api_key, llm_model = get_llm_config()
+    if not api_key:
+        return None
+
+    user_text = build_product_user_prompt(
+        product_type, country_name, platform,
+        model_name, model_tagline, count, user_description,
+    )
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT_PRODUCT},
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "text", "text": user_text},
+            ],
+        },
+    ]
+
+    content = await _call_llm(api_key, llm_model, messages)
+    if not content:
+        return None
+
+    result = _parse_llm_json(content, LLMPromptsOutput)
+    if result and result.get("prompts"):
+        return result["prompts"]
+    return None
+
+
+async def generate_metadata(
+    product_type: str,
+    country_name: str,
+    platform: str,
+    user_description: str = "",
+) -> dict | None:
+    """生成爆款标题/标签/描述，失败返回 None"""
+    api_key, llm_model = get_llm_config()
+    if not api_key:
+        return None
+
+    user_text = build_metadata_user_prompt(
+        product_type, country_name, platform, user_description,
+    )
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT_METADATA},
+        {"role": "user", "content": user_text},
+    ]
+
+    content = await _call_llm(api_key, llm_model, messages)
+    if not content:
+        return None
+
+    result = _parse_llm_json(content, LLMMetadata)
+    if result:
+        if result.get("tags"):
+            result["tags"] = _normalize_tags(result["tags"])
+        return result
+    return None

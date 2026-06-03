@@ -458,10 +458,14 @@
   "product_type": "连衣裙",
   "country": "japan",
   "model": "general",
+  "model_name": "通用模型",
+  "model_desc": "综合效果好，适合大多数商品",
+  "description": "显瘦百搭，透气面料",
   "generate_type": "comparison",
   "style_index": 0,
   "prompt_size": "auto",
-  "prompt_resolution": "1k"
+  "prompt_resolution": "1k",
+  "model_image_count": 4
 }
 ```
 
@@ -470,11 +474,15 @@
 | `image_url` | string | **必填** | 参考图 URL 或 base64 data URL |
 | `product_type` | string | `""` | 产品品类描述（≤200 字符） |
 | `country` | string | `"japan"` | 目标国家：`japan/korea/usa/thailand/vietnam/malaysia/philippines/indonesia/china` |
-| `model` | string | `"general"` | 模型风格 |
+| `model` | string | `"general"` | 风格 code（用于历史记录，不影响生图） |
+| `model_name` | string | `"通用模型"` | 风格名称，直接传给 LLM（如"人像增强"） |
+| `model_desc` | string | `"综合效果好"` | 风格描述，直接传给 LLM |
+| `description` | string | `""` | 商品卖点描述（≤500 字符），传给 LLM 融入生图 prompt |
 | `generate_type` | string | `"all"` | 生成类型：`comparison/detail/test`（不允许 `all`，请用异步接口） |
 | `style_index` | int | `0` | test 模式下的风格索引（0-10） |
 | `prompt_size` | string | `"auto"` | 生成尺寸：`auto/1:1/4:3/3:4/16:9/9:16` |
 | `prompt_resolution` | string | `"1k"` | 分辨率：`1k/2k/4k` |
+| `model_image_count` | int | `4` | 9 张主图中模特图的数量（0-9），其余为商品图 |
 
 **图片限制：**
 - 格式：JPEG / PNG / WebP / AVIF
