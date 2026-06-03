@@ -183,6 +183,7 @@
 
 **错误响应：**
 - `401` — 用户名或密码错误
+- `403` — 账号已被冻结，请联系管理员解封
 - `423` — 账号已锁定（连续失败 ≥5 次，锁定 15 分钟）
 
 ---
@@ -230,6 +231,21 @@
   "user": null,
   "wallet": null,
   "csrf_token": "",
+  "generation_cost_points": 10
+}
+```
+
+冻结用户时（保持登录态，返回 `status: "frozen"`）：
+```json
+{
+  "user": {
+    "id": 1,
+    "username": "testuser",
+    "is_unlimited": false,
+    "status": "frozen"
+  },
+  "wallet": { "user_id": 1, "balance": 500, "is_unlimited": false },
+  "csrf_token": "jwt-jti-string",
   "generation_cost_points": 10
 }
 ```
@@ -730,7 +746,8 @@ eventSource.onmessage = (event) => {
       "today_used": 5,
       "total_used": 100,
       "fail_count": 0,
-      "balance_usd": 10.5
+      "balance_usd": 10.5,
+      "total_balance_usd": 50.0
     }
   ]
 }
@@ -761,7 +778,48 @@ eventSource.onmessage = (event) => {
 
 ---
 
-### 3. 生成历史
+### 3. 用户管理
+
+#### `POST /admin/users` — 管理员创建用户
+
+**限流：** 20 次/分钟
+
+**请求体：**
+```json
+{
+  "username": "string (3-50 字符)",
+  "password": "string (1-128 字符)",
+  "phone": "string (可选, ≤30 字符)",
+  "email": "string (可选, ≤120 字符)",
+  "note": "string (可选, ≤500 字符)",
+  "is_unlimited": false
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `username` | string | 是 | 用户名（3-50 字符） |
+| `password` | string | 是 | 密码（无需满足强密码策略） |
+| `phone` | string | 否 | 手机号 |
+| `email` | string | 否 | 邮箱 |
+| `note` | string | 否 | 备注 |
+| `is_unlimited` | boolean | 否 | 是否无限额度（默认 false，不扣积分） |
+
+**成功响应：**
+```json
+{
+  "id": 1,
+  "username": "testuser"
+}
+```
+
+**错误响应：**
+- `400` — 密码为空
+- `409` — 用户名已存在
+
+---
+
+### 4. 生成历史
 
 #### `GET /admin/history` — 查询生成历史（分页）
 
@@ -802,7 +860,7 @@ JSON 字段（`llm_request`, `llm_response`, `tasks_detail`）自动解析为对
 
 ---
 
-### 4. 充值套餐管理
+### 5. 充值套餐管理
 
 #### `GET /admin/credit-packages` — 查询所有套餐（含下架）
 
@@ -825,7 +883,7 @@ JSON 字段（`llm_request`, `llm_response`, `tasks_detail`）自动解析为对
 
 ---
 
-### 5. 订单管理
+### 6. 订单管理
 
 #### `GET /admin/orders` — 查询全部订单
 
@@ -853,7 +911,7 @@ JSON 字段（`llm_request`, `llm_response`, `tasks_detail`）自动解析为对
 
 ---
 
-### 6. 生成成本配置
+### 7. 生成成本配置
 
 #### `PUT /admin/generation-cost` — 更新每次生成扣费积分
 
@@ -865,7 +923,7 @@ JSON 字段（`llm_request`, `llm_response`, `tasks_detail`）自动解析为对
 
 ---
 
-### 7. LLM 配置
+### 8. LLM 配置
 
 #### `GET /admin/llm-config` — 获取 LLM 配置（Key 脱敏）
 
@@ -902,7 +960,7 @@ JSON 字段（`llm_request`, `llm_response`, `tasks_detail`）自动解析为对
 
 ---
 
-### 8. 系统健康
+### 9. 系统健康
 
 #### `GET /admin/health` — 系统健康状态
 
