@@ -67,7 +67,8 @@ export async function proxyToBackend(
   try {
     let targetUrl: string;
     if (customPath) {
-      targetUrl = buildBackendUrl(customPath);
+      const url = new URL(request.url);
+      targetUrl = buildBackendUrl(customPath, url.search);
     } else {
       const url = new URL(request.url);
       const subPath = params ? params.path.join("/") : "";

@@ -102,6 +102,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             label TEXT NOT NULL,
             category TEXT NOT NULL DEFAULT '自定义',
+            user_id INTEGER,
             created_at TEXT DEFAULT (datetime('now'))
         );
     """)
@@ -229,6 +230,11 @@ def init_db():
     ]:
         if col_name not in order_cols:
             db.execute(f"ALTER TABLE orders ADD COLUMN {col_name} {col_def}")
+    # Migration: add user_id to custom_product_types
+    ct_cols = [r[1] for r in db.execute("PRAGMA table_info('custom_product_types')").fetchall()]
+    if "user_id" not in ct_cols:
+        db.execute("ALTER TABLE custom_product_types ADD COLUMN user_id INTEGER")
+    db.execute("DELETE FROM custom_product_types WHERE user_id IS NULL")
     db.commit()
     db.executescript("""
         CREATE TABLE IF NOT EXISTS task_store (
@@ -1350,27 +1356,31 @@ def cleanup_expired_revoked_tokens() -> int:
 
 # ========== 自定义产品类型 CRUD ==========
 
-def get_all_custom_types() -> list[dict]:
+def get_custom_types(user_id: int) -> list[dict]:
     db = get_db()
     rows = db.execute(
-        "SELECT * FROM custom_product_types ORDER BY created_at ASC"
+        "SELECT * FROM custom_product_types WHERE user_id = ? ORDER BY created_at ASC",
+        (user_id,),
     ).fetchall()
     return [dict(r) for r in rows]
 
 
-def add_custom_type(label: str, category: str) -> int:
+def add_custom_type(label: str, category: str, user_id: int) -> int:
     db = get_db()
     cur = db.execute(
-        "INSERT INTO custom_product_types (label, category) VALUES (?, ?)",
-        (label.strip(), category.strip()),
+        "INSERT INTO custom_product_types (label, category, user_id) VALUES (?, ?, ?)",
+        (label.strip(), category.strip(), user_id),
     )
     db.commit()
     return cur.lastrowid
 
 
-def delete_custom_type(type_id: int) -> bool:
+def delete_custom_type(type_id: int, user_id: int) -> bool:
     db = get_db()
-    cur = db.execute("DELETE FROM custom_product_types WHERE id = ?", (type_id,))
+    cur = db.execute(
+        "DELETE FROM custom_product_types WHERE id = ? AND user_id = ?",
+        (type_id, user_id),
+    )
     db.commit()
     return cur.rowcount > 0
 

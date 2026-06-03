@@ -323,7 +323,11 @@ export default function HomePage() {
   const [paymentSubmitting, setPaymentSubmitting] = useState(false);
 
   useEffect(() => {
-    fetch("/api/custom-types")
+    if (!user) {
+      setCustomTypes([]);
+      return;
+    }
+    fetch("/api/custom-types", { credentials: "include" })
       .then((r) => r.json())
       .then((data) => {
         if (data.types) {
@@ -337,7 +341,7 @@ export default function HomePage() {
         }
       })
       .catch((e) => logger.error("Failed to load custom types:", e));
-  }, []);
+  }, [user]);
 
   useEffect(() => {
     fetch("/api/auth/me")
@@ -906,9 +910,13 @@ export default function HomePage() {
     const category = newCustomTypeCategory.trim() || "自定义";
 
     try {
+      const currentCsrfToken = await refreshCsrfToken();
       const res = await fetchWithRetry("/api/custom-types", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": currentCsrfToken,
+        },
         body: JSON.stringify({ label: newCustomTypeName.trim(), category }),
       });
       if (!res.ok) throw new Error("保存失败");
@@ -944,8 +952,15 @@ export default function HomePage() {
     if (!confirm("确定删除此自定义类型？")) return;
 
     try {
-      const res = await fetchWithRetry(`/api/custom-types?id=${idMatch[1]}`, { method: "DELETE" });
-      if (!res.ok) throw new Error("删除失败");
+      const currentCsrfToken = await refreshCsrfToken();
+      const res = await fetchWithRetry(`/api/custom-types/${idMatch[1]}`, {
+        method: "DELETE",
+        headers: { "X-CSRF-Token": currentCsrfToken },
+      });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(`删除失败 (${res.status}): ${JSON.stringify(errBody)}`);
+      }
     } catch (e) {
       logger.error("删除自定义类型失败:", e);
       return;

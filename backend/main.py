@@ -67,7 +67,7 @@ from database import (
     add_history, add_key, get_key_by_value,
     save_task_progress, load_pending_tasks, delete_old_tasks, init_db,
     get_config, set_config, get_all_configs,
-    get_all_custom_types, add_custom_type, delete_custom_type,
+    get_custom_types, add_custom_type, delete_custom_type,
     charge_generation, create_customer, create_order, get_active_keys, get_generation_cost_points,
     get_wallet, list_all_orders, list_credit_packages, list_user_history,
     list_user_ledger, list_user_orders, mark_order_paid,
@@ -1777,23 +1777,25 @@ async def generate_status_stream(
 
 
 @app.get("/api/custom-types")
-async def list_custom_types():
-    return {"types": get_all_custom_types()}
+async def list_custom_types(user: dict = Depends(authenticate_customer)):
+    return {"types": get_custom_types(int(user["id"]))}
 
 
 @app.post("/api/custom-types")
 @limiter.limit("30/minute")
-async def create_custom_type(request: Request, req: CreateCustomTypeRequest):
+async def create_custom_type(request: Request, req: CreateCustomTypeRequest, user: dict = Depends(authenticate_customer)):
+    _verify_user_csrf(request, user)
     label = sanitize_input(req.label, 100)
     category = sanitize_input(req.category, 50)
-    tid = add_custom_type(label, category)
+    tid = add_custom_type(label, category, int(user["id"]))
     return {"id": tid, "label": label, "category": category}
 
 
 @app.delete("/api/custom-types/{type_id}")
 @limiter.limit("30/minute")
-async def remove_custom_type(request: Request, type_id: int):
-    ok = delete_custom_type(type_id)
+async def remove_custom_type(request: Request, type_id: int, user: dict = Depends(authenticate_customer)):
+    _verify_user_csrf(request, user)
+    ok = delete_custom_type(type_id, int(user["id"]))
     if not ok:
         raise HTTPException(status_code=404, detail="类型不存在")
     return {"message": "删除成功"}

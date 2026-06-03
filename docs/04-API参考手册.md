@@ -82,7 +82,7 @@
 | `POST /api/generate` | 10 次/分钟 | 用户 ID 或 IP |
 | `POST /api/generate/async` | 20 次/分钟 | 用户 ID 或 IP |
 | `GET /api/generate/status/*` | 30 次/分钟 | 用户 ID 或 IP |
-| `POST /api/custom-types` | 30 次/分钟 | 用户 ID 或 IP |
+| `POST /api/custom-types` | 30 次/分钟 | 用户 ID |
 | `POST /admin/login` | 5 次/分钟 | IP |
 | 管理接口（写操作） | 10-20 次/分钟 | 管理员 ID 或 IP |
 
@@ -640,9 +640,11 @@ eventSource.onmessage = (event) => {
 
 ### 5. 自定义产品类型
 
+> 自定义产品类型按用户隔离，每个用户只能查看和管理自己的类型。
+
 #### `GET /api/custom-types` — 查询自定义类型列表
 
-**认证：** 无需认证
+**认证：** 需要用户登录（`user_access_token` Cookie）
 
 **响应：**
 ```json
@@ -661,6 +663,8 @@ eventSource.onmessage = (event) => {
 ---
 
 #### `POST /api/custom-types` — 新增自定义类型
+
+**认证：** 需要用户登录 + CSRF Token（`X-CSRF-Token` Header）
 
 **限流：** 30 次/分钟
 
@@ -685,6 +689,8 @@ eventSource.onmessage = (event) => {
 
 #### `DELETE /api/custom-types/{type_id}` — 删除自定义类型
 
+**认证：** 需要用户登录 + CSRF Token（`X-CSRF-Token` Header）
+
 **限流：** 30 次/分钟
 
 **成功响应：**
@@ -695,7 +701,8 @@ eventSource.onmessage = (event) => {
 ```
 
 **错误响应：**
-- `404` — 类型不存在
+- `403` — CSRF 校验失败
+- `404` — 类型不存在（或不属于当前用户）
 
 ---
 
