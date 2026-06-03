@@ -43,3 +43,51 @@ def auto_fill_env(env_path=None):
     if modified:
         with open(env_path, "w", encoding="utf-8") as f:
             f.writelines(lines)
+        _sync_root_env(env_path)
+
+
+def _sync_root_env(backend_env_path: str):
+    """Copy the auto-filled API_AUTH_TOKEN to the root .env so the
+    frontend Docker container can pick it up."""
+    backend_dir = os.path.dirname(backend_env_path)
+    root_env_path = os.path.normpath(os.path.join(backend_dir, "..", ".env"))
+
+    # Read the token from the backend .env we just wrote
+    token = None
+    with open(backend_env_path, "r", encoding="utf-8") as f:
+        for line in f:
+            stripped = line.strip()
+            if stripped.startswith("API_AUTH_TOKEN="):
+                token = stripped[len("API_AUTH_TOKEN="):]
+                break
+    if not token:
+        return
+
+    # Root .env doesn't exist yet — create it
+    if not os.path.isfile(root_env_path):
+        with open(root_env_path, "w", encoding="utf-8") as f:
+            f.write(f"API_AUTH_TOKEN={token}\n")
+        print("[INIT] Created root .env with API_AUTH_TOKEN")
+        return
+
+    # Update existing root .env (only if value is empty or missing)
+    with open(root_env_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    found = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("API_AUTH_TOKEN="):
+            old_val = stripped[len("API_AUTH_TOKEN="):]
+            if not old_val:
+                lines[i] = f"API_AUTH_TOKEN={token}\n"
+                print("[INIT] Synced API_AUTH_TOKEN to root .env")
+            found = True
+            break
+
+    if not found:
+        lines.append(f"API_AUTH_TOKEN={token}\n")
+        print("[INIT] Added API_AUTH_TOKEN to root .env")
+
+    with open(root_env_path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
