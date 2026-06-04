@@ -4,6 +4,8 @@ FastAPI 图片生成后端
 上传图片 → 品类匹配 → prompt 构建 → apimart 批量生成 → 轮询 → 返回结果
 """
 
+from __future__ import annotations
+
 import asyncio
 import base64
 import json
