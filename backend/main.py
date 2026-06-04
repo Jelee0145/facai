@@ -1913,9 +1913,19 @@ async def list_api_keys(user: dict = Depends(authenticate)):
 @limiter.limit("10/minute")
 async def create_api_key(request: Request, req: CreateApiKeyRequest, user: dict = Depends(authenticate), _csrf=Depends(verify_csrf)):
     """添加 API Key"""
+    from sqlite3 import IntegrityError
+    import logging as _log
+    _logger = _log.getLogger("ecommerce-gen.api-keys")
     key_value = sanitize_input(req.key_value, 500)
     name = sanitize_input(req.name, 100)
-    kid = add_key(key_value, name, req.daily_limit)
+    try:
+        kid = add_key(key_value, name, req.daily_limit)
+    except IntegrityError as e:
+        _logger.warning(f"Duplicate key insert rejected: {e}")
+        raise HTTPException(status_code=409, detail="该 Key 已存在，不能重复添加")
+    except Exception as e:
+        _logger.error(f"add_key failed: {type(e).__name__}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"保存失败: {type(e).__name__}: {e}")
     return {"id": kid, "message": "Key 添加成功"}
 
 
